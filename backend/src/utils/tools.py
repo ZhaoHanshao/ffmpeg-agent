@@ -3,7 +3,6 @@ from langchain_core.runnables import RunnableConfig
 from utils.tool.db_search import get_text
 from dotenv import load_dotenv
 import os,subprocess
-from pydantic import BaseModel
 from tool.clear import clear_dir 
 
 load_dotenv()
@@ -42,7 +41,6 @@ def get_files(config:RunnableConfig):
     } #返回给LLM读取的
     
 
-# TODO 编写执行命令的tool
 @tool
 def excute_command(command:str):
     '''
@@ -65,4 +63,4 @@ def excute_command(command:str):
 
 
 
-# TODO 要学的的东西，获取格式化的输出结果，而不是每次都是content
+# 要学的东西，tool返回结果为字典可以修改state
