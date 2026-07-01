@@ -1,6 +1,5 @@
 from dotenv import load_dotenv
 import os
-
 from langchain_openai import ChatOpenAI
 
 load_dotenv()
@@ -14,5 +13,5 @@ model = ChatOpenAI(
     base_url=BASE_URL,
     api_key=API_KEY,
     temperature=0.2,
-    max_tokens = 2048
+    max_tokens=2048,
 )
