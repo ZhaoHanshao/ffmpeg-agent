@@ -10,10 +10,11 @@ load_dotenv()
 
 DB_DIR = os.getenv('DB_DIR')
 COLLECTION_NAME = os.getenv('COLLECTION_NAME')
+DBG = os.getenv('DBG')
 
 class BGEEmbedding(Embeddings):
 
-    def __init__(self, path='/home/shaohan/my_file/code/work/work-agent/test-agent/01-RAG知识库制作/data/bge_small'):
+    def __init__(self, path=DBG):  # TODO: 默认参数 hardcode 了另一个项目的路径。DB_DIR 环境变量缺失时会报错，应移除默认值或使用本项目的 data/bge_small 路径
         super().__init__()
         self.model = SentenceTransformer(path)
 
@@ -31,10 +32,11 @@ def get_embeddings() -> Embeddings:
     '''
     return BGEEmbedding(path=DB_DIR)
 
-embeddings = get_embeddings()
+embeddings = get_embeddings()  # TODO: 全局作用域直接加载 embedding 模型（~200MB），模块 import 时即阻塞。应惰性加载或异步初始化
 
+# TODO: 全局作用域直接执行 Chroma() 初始化，模块加载时若环境变量缺失会直接崩溃。应延迟初始化或使用惰性加载
 vector_db = Chroma(
-    persist_directory=DB_DIR,
+    persist_directory=DB_DIR, 
     embedding_function=embeddings,
     collection_name=COLLECTION_NAME,
 )
