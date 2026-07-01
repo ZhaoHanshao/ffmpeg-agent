@@ -30,7 +30,7 @@ def get_embeddings() -> Embeddings:
     '''
     调用本地模型
     '''
-    return BGEEmbedding(path=DB_DIR)
+    return BGEEmbedding(path=DBG)
 
 embeddings = get_embeddings()  # TODO: 全局作用域直接加载 embedding 模型（~200MB），模块 import 时即阻塞。应惰性加载或异步初始化
 
