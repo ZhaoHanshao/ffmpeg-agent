@@ -2,7 +2,7 @@ from langchain.tools import tool
 from langchain_core.runnables import RunnableConfig
 from utils.tool.db_search import get_text
 from dotenv import load_dotenv
-import os,subprocess
+import os,subprocess,shlex
 from tool.clear import clear_dir
 
 load_dotenv()
@@ -50,7 +50,7 @@ def excute_command(command:str):
     command:标准的终端ffmpeg执行命令，例如:ffmpeg -i input.mp4 output.avi
     返回中文常规执行结果
     '''
-    exit_code = subprocess.run(args=command,capture_output=True)
+    exit_code = subprocess.run(args=shlex.split(command), capture_output=True)
     if exit_code.returncode==0:
         return {
             'command':command,
