@@ -1,8 +1,15 @@
-import os, uuid, shutil
+import os, sys, uuid, shutil
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+# 确保 backend/ 在 sys.path 中，使 app 包可被 import
+_backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+
+from app.graph import run_graph
 
 load_dotenv()
 
@@ -44,7 +51,6 @@ async def upload_files(files: list[UploadFile] = File(...)):
 @app.post("/api/chat")
 async def chat(question: str = Form(...)):
     """发送问题，运行 graph，自动使用 upload/ 中的文件"""
-    from app.graph import run_graph
     result = run_graph(question)
     if os.path.exists(UPLOAD_DIR):
         shutil.rmtree(UPLOAD_DIR)
