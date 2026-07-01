@@ -14,5 +14,5 @@ model = ChatOpenAI(
     base_url=BASE_URL,
     api_key=API_KEY,
     temperature=0.2,
-    max_tokens = 256
+    max_tokens = 2048
 )
