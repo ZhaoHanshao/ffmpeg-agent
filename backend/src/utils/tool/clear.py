@@ -3,9 +3,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DOWNLOWD = os.getenv('DOWNLOAD')
+DOWNLOAD = os.getenv('DOWNLOAD')
 
-def clear_dir(dir:str=DOWNLOWD):
+def clear_dir(dir:str=DOWNLOAD):
     if not os.path.exists(dir): #判定是否存在，不存在则创建
         os.makedirs(dir,exist_ok=True)
     else:
