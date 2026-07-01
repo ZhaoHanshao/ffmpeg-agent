@@ -3,14 +3,14 @@ from langchain_core.runnables import RunnableConfig
 from utils.tool.db_search import get_text
 from dotenv import load_dotenv
 import os,subprocess
-from tool.clear import clear_dir 
+from tool.clear import clear_dir
 
 load_dotenv()
 DOWNLOAD = os.getenv('DOWNLOAD')
 UPLOAD = os.getenv('UPLOAD')
 
 @tool
-def get_commend(squry:str):
+def get_commend(squry:str):  # TODO: 函数名拼写错误 get_commend → get_command；参数名拼写错误 squry → query
     '''
     根据用户的问题查询ffmpeg文档中相关的内容
     squry:用户的问题
@@ -32,9 +32,10 @@ def get_files(config:RunnableConfig):
     返回结果：第一个为要处理的文件，即在ffmpeg命令中 -i 后跟着的input
              第二个为处理后的文件存放的地址
     '''
+    clear_dir()
     files = os.listdir(UPLOAD)
     for i, file in enumerate(files,0):
-        files[i] = f'{UPLOAD}\{file}'
+        files[i] = os.path.join(UPLOAD, file)
     return {
         "需要处理":files,
         "存放地址":UPLOAD
