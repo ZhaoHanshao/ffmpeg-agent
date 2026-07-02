@@ -30,6 +30,7 @@ def get_embeddings() -> Embeddings:
     return BGEEmbedding(path=DBG)
 
 
+print('=' * 20 + '加载向量数据库' + '=' * 20)
 embeddings = get_embeddings()
 
 vector_db = Chroma(
@@ -40,6 +41,8 @@ vector_db = Chroma(
 
 
 def get_text(question: str):
+    print('=' * 20 + '向量检索' + '=' * 20)
+    print(f'检索内容：{question[:200]}')
     try:
         result = vector_db.similarity_search(query=question, k=5)
         return [doc.page_content for doc in result]

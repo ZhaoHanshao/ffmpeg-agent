@@ -1,5 +1,5 @@
 import os, shlex, json
-from app.agents import agent_chat, agent_excute, agent_search
+from app.agents import agent_chat, agent_execute, agent_search
 from langgraph.graph import START, END, StateGraph, MessagesState
 from langchain.messages import ToolMessage, AnyMessage, AIMessage, HumanMessage
 
@@ -20,16 +20,21 @@ def search(state: state):
     if state['flag']:
         return state
     if state['command'] is not None:
-        res = agent_search.invoke({'question': f'{mes},{state["command_result"]}'})
+        res = agent_search.invoke({'messages': [*mes, HumanMessage(content=state['command_result'])]})
     else:
-        res = agent_search.invoke({'question': mes})
-    state['result'] = res['message'][-1].content
+        res = agent_search.invoke({'messages': mes})
+    state['result'] = res['messages'][-1].content
     return state
 
 
-def excute(state: state):
+def execute(state: state):
     print('=' * 20 + '执行命令' + '=' * 20)
-    res = agent_excute.invoke({'question': state['result']})
+    user_question = state['history'][0].content if state.get('history') else ''
+    execute_prompt = (
+        f'用户问题：{user_question}\n\n'
+        f'知识库检索结果：{state["result"]}'
+    )
+    res = agent_execute.invoke({'messages': [HumanMessage(content=execute_prompt)]})
     for msg in reversed(res['messages']):
         if isinstance(msg, ToolMessage):
             try:
@@ -50,46 +55,66 @@ def excute(state: state):
     return state
 
 
-def chat(state: state):
-    print('=' * 20 + '执行对话' + '=' * 20)
-    res = agent_chat.invoke({'question': state['result']})
-    ai_content = res['messages'][-1].content if 'messages' in res else str(res)
-    state['history'] = (state.get('history', []) or []) + [AIMessage(content=ai_content)]
-    return state
+def which_continue_exec(state: state):
+    """执行阶段的路由：flag=False 继续执行，否则结束"""
+    branch = END if state['flag'] else 'execute'
+    print('=' * 20 + f'路由决策：{branch}' + '=' * 20)
+    return branch
 
 
-def which_continue(state: state):
-    return 'excute' if state['flag'] is False else 'chat'
+# ── 执行图（search + execute 循环，不含 chat） ──
+exec_workflow = StateGraph(state_schema=state)
+exec_workflow.add_node('search', search)
+exec_workflow.add_node('execute', execute)
+exec_workflow.add_edge(START, 'search')
+exec_workflow.add_edge('execute', 'search')
+exec_workflow.add_conditional_edges(
+    'search',
+    which_continue_exec,
+    {END: END, 'execute': 'execute'},
+)
 
 
-workflow = StateGraph(state_schema=state)
-workflow.add_node('search', search)
-workflow.add_node('excute', excute)
-workflow.add_node('chat', chat)
-workflow.add_edge(START, 'search')
-workflow.add_edge('excute', 'search')
-workflow.add_edge('chat', END)
-workflow.add_conditional_edges('search', which_continue)
+def exec_graph(question: str) -> dict:
+    """运行 search+execute 执行循环，返回执行后的状态字典。"""
+    print('=' * 20 + '开始执行' + '=' * 20)
+    print(f'用户问题：{question}')
+    compiled = exec_workflow.compile()
+    result = compiled.invoke({
+        "messages": [HumanMessage(content=question)],
+        "command": None,
+        "result": "",
+        "command_result": "",
+        "history": [],
+        "flag": False,
+        "output_file": "",
+    })
+    return result
 
 
-def run_graph(question: str) -> dict:
-    """编译并执行图，返回 {reply, output_file}"""
-    compiled = workflow.compile()
-    result = compiled.invoke({"messages": [HumanMessage(content=question)]})
-    reply = ''
-    if result.get('history'):
-        for msg in reversed(result['history']):
-            if isinstance(msg, AIMessage):
-                reply = msg.content
-                break
-    output_file = result.get('output_file', '') or ''
-    return {"reply": reply, "output_file": output_file}
+def build_chat_prompt(state: dict) -> str:
+    """根据执行状态构建 chat agent 的输入提示。"""
+    user_question = state['history'][0].content if state.get('history') else ''
+    prompt = (
+        f'用户问题：{user_question}\n\n'
+        f'知识库检索结果：{state.get("result", "")}\n'
+    )
+    if state.get('command'):
+        prompt += f'\n执行的命令：{state["command"]}'
+    if state.get('command_result'):
+        prompt += f'\n命令执行结果：{state["command_result"]}'
+    if state.get('output_file'):
+        prompt += f'\n输出文件：{state["output_file"]}'
+    return prompt
 
 
 if __name__ == '__main__':
     import sys
     q = ' '.join(sys.argv[1:]) or '如何将图片反色？'
-    res = run_graph(q)
-    print(f"AI: {res['reply']}")
-    if res['output_file']:
-        print(f"输出文件: {res['output_file']}")
+    exec_state = exec_graph(q)
+    prompt = build_chat_prompt(exec_state)
+    res = agent_chat.invoke({'messages': [HumanMessage(content=prompt)]})
+    reply = res['messages'][-1].content if 'messages' in res else str(res)
+    print(f"AI: {reply}")
+    if exec_state.get('output_file'):
+        print(f"输出文件: {exec_state['output_file']}")
