@@ -1,15 +1,18 @@
 <script setup>
-import { ref, nextTick } from 'vue'
+import { ref, nextTick, onMounted } from 'vue'
 
 const API_BASE = '/api'
 
 // ── 状态 ──
 const uploadedFiles = ref([])
+const outputFiles = ref([])
 const messages = ref([])
 const question = ref('')
 const uploading = ref(false)
 const sending = ref(false)
 const dragOver = ref(false)
+const loadingUpload = ref(false)
+const loadingOutput = ref(false)
 
 const messagesEnd = ref(null)
 const fileInput = ref(null)
@@ -20,6 +23,33 @@ function autoResize() {
   if (!el) return
   el.style.height = 'auto'
   el.style.height = el.scrollHeight + 'px'
+}
+
+// ── 文件列表刷新 ──
+async function refreshUploadedFiles() {
+  loadingUpload.value = true
+  try {
+    const res = await fetch(`${API_BASE}/upload`)
+    const data = await res.json()
+    uploadedFiles.value = data.files || []
+  } catch (e) {
+    console.error('获取上传文件列表失败:', e)
+  } finally {
+    loadingUpload.value = false
+  }
+}
+
+async function refreshOutputFiles() {
+  loadingOutput.value = true
+  try {
+    const res = await fetch(`${API_BASE}/output`)
+    const data = await res.json()
+    outputFiles.value = data.files || []
+  } catch (e) {
+    console.error('获取已完成文件列表失败:', e)
+  } finally {
+    loadingOutput.value = false
+  }
 }
 
 // ── 文件上传 ──
@@ -45,8 +75,8 @@ async function doUpload(files) {
     const form = new FormData()
     for (const f of files) form.append('files', f)
     const res = await fetch(`${API_BASE}/upload`, { method: 'POST', body: form })
-    const data = await res.json()
-    uploadedFiles.value = data.uploaded || []
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    await refreshUploadedFiles()
   } catch (e) {
     messages.value.push({ role: 'system', text: `上传失败: ${e.message}` })
   } finally {
@@ -54,7 +84,18 @@ async function doUpload(files) {
   }
 }
 
-// ── 对话 ──
+// ── 文件删除 ──
+async function deleteUploadedFile(filename) {
+  try {
+    const res = await fetch(`${API_BASE}/upload/${encodeURIComponent(filename)}`, { method: 'DELETE' })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    await refreshUploadedFiles()
+  } catch (e) {
+    messages.value.push({ role: 'system', text: `删除失败: ${e.message}` })
+  }
+}
+
+// ── 对话（SSE 流式输出） ──
 async function sendMessage() {
   const text = question.value.trim()
   if (!text || sending.value) return
@@ -64,20 +105,61 @@ async function sendMessage() {
   sending.value = true
   scrollBottom()
 
+  // 创建占位 AI 消息，逐步填入 token
+  const reply = { role: 'ai', text: '' }
+  messages.value.push(reply)
+
   try {
     const form = new FormData()
     form.append('question', text)
     const res = await fetch(`${API_BASE}/chat`, { method: 'POST', body: form })
-    const data = await res.json()
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
-    const reply = { role: 'ai', text: data.reply || '(无回复)' }
-    if (data.output_file) reply.outputFile = data.output_file
-    messages.value.push(reply)
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      // 保留最后一个不完整的行
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith('data: ')) continue
+
+        const payload = trimmed.slice(6)
+        if (payload === '{"event":"done"}') continue
+
+        try {
+          const data = JSON.parse(payload)
+          if (data.event === 'token') {
+            reply.text += data.text
+            // 触发 Vue 响应式更新
+            messages.value = [...messages.value]
+            scrollBottom()
+          } else if (data.event === 'meta' && data.output_file) {
+            reply.outputFile = data.output_file
+          }
+        } catch {
+          // 跳过不完整的 JSON
+        }
+      }
+    }
   } catch (e) {
-    messages.value.push({ role: 'system', text: `请求失败: ${e.message}` })
+    reply.text = `请求失败: ${e.message}`
   } finally {
     sending.value = false
     scrollBottom()
+    // 对话完成后 upload/ 已被后端清空，刷新两侧列表
+    await refreshUploadedFiles()
+    if (reply.outputFile) {
+      await refreshOutputFiles()
+    }
   }
 }
 
@@ -100,6 +182,12 @@ function isImage(name) {
 function isVideo(name) {
   return /\.(mp4|webm|avi|mov|mkv)$/i.test(name)
 }
+
+// ── 初始化 ──
+onMounted(() => {
+  refreshUploadedFiles()
+  refreshOutputFiles()
+})
 </script>
 
 <template>
@@ -112,98 +200,161 @@ function isVideo(name) {
       </div>
     </header>
 
-    <!-- ── 主体 ── -->
-    <main class="main">
-      <!-- 上传区 -->
-      <section class="upload-section">
-        <div
-          class="drop-zone"
-          :class="{ 'drag-over': dragOver, 'has-files': uploadedFiles.length }"
-          @dragover.prevent="dragOver = true"
-          @dragleave="dragOver = false"
-          @drop.prevent="onDrop"
-          @click="triggerUpload"
-        >
-          <input
-            ref="fileInput"
-            type="file"
-            multiple
-            hidden
-            @change="onFileChange"
-          />
-          <template v-if="!uploadedFiles.length">
-            <span class="drop-icon">📁</span>
-            <span class="drop-text">拖拽文件到此处，或点击选择</span>
-            <span class="drop-hint">支持图片、视频、音频等任意文件</span>
-          </template>
-          <template v-else>
-            <span class="drop-icon">✅</span>
-            <span class="drop-text">{{ uploadedFiles.length }} 个文件已就绪</span>
-          </template>
-          <div v-if="uploading" class="uploading-overlay">
-            <div class="spinner" />
-            <span>上传中…</span>
-          </div>
-        </div>
-
-        <!-- 已上传文件列表 -->
-        <div v-if="uploadedFiles.length" class="file-chips">
-          <div v-for="f in uploadedFiles" :key="f" class="chip">
-            <span>📄 {{ f }}</span>
-          </div>
-        </div>
-      </section>
-
-      <!-- ── 消息区 ── -->
-      <section class="chat-section">
-        <div v-if="!messages.length" class="empty-chat">
-          <div class="empty-icon">💬</div>
-          <p>上传文件后，告诉我你想对文件做什么</p>
-          <p class="examples">
-            例如：<em>把图片反色</em> · <em>转成 mp4</em> · <em>裁剪中间 10 秒</em>
-          </p>
-        </div>
-
-        <div v-for="(msg, i) in messages" :key="i" class="msg-row" :class="msg.role">
-          <div class="avatar">{{ msg.role === 'user' ? '👤' : msg.role === 'ai' ? '🤖' : '⚙️' }}</div>
-          <div class="bubble">
-            <div class="msg-text" v-html="msg.text.replace(/\n/g, '<br>')" />
-            <!-- 文件预览 / 下载 -->
-            <div v-if="msg.outputFile" class="output-area">
-              <img v-if="isImage(msg.outputFile)" :src="`${API_BASE}/output/${msg.outputFile}`" class="preview-img" />
-              <video v-else-if="isVideo(msg.outputFile)" :src="`${API_BASE}/output/${msg.outputFile}`" class="preview-video" controls />
-              <a :href="`${API_BASE}/output/${msg.outputFile}`" class="download-link" download>⬇️ 下载 {{ msg.outputFile }}</a>
+    <!-- ── 双栏主体 ── -->
+    <div class="body">
+      <!-- ===== 左栏：文件管理 ===== -->
+      <aside class="left-panel">
+        <!-- 上传区域 -->
+        <section class="upload-section">
+          <div
+            class="drop-zone"
+            :class="{ 'drag-over': dragOver, 'has-files': uploadedFiles.length }"
+            @dragover.prevent="dragOver = true"
+            @dragleave="dragOver = false"
+            @drop.prevent="onDrop"
+            @click="triggerUpload"
+          >
+            <input
+              ref="fileInput"
+              type="file"
+              multiple
+              hidden
+              @change="onFileChange"
+            />
+            <template v-if="!uploadedFiles.length">
+              <span class="drop-icon">📁</span>
+              <span class="drop-text">拖拽或点击上传文件</span>
+            </template>
+            <template v-else>
+              <span class="drop-icon">✅</span>
+              <span class="drop-text">{{ uploadedFiles.length }} 个文件已就绪</span>
+            </template>
+            <div v-if="uploading" class="uploading-overlay">
+              <div class="spinner" />
+              <span>上传中…</span>
             </div>
           </div>
-        </div>
+        </section>
 
-        <div v-if="sending" class="msg-row ai">
-          <div class="avatar">🤖</div>
-          <div class="bubble thinking">
-            <span class="dot-pulse" />
+        <!-- 已上传文件 -->
+        <section class="file-section">
+          <div class="section-title">
+            已上传文件
+            <span v-if="uploadedFiles.length" class="section-count">{{ uploadedFiles.length }}</span>
           </div>
+          <div v-if="loadingUpload" class="file-status">
+            <span class="mini-spinner" /> 加载中…
+          </div>
+          <div v-else-if="!uploadedFiles.length" class="file-status empty">
+            <span>暂无上传文件</span>
+          </div>
+          <div v-else class="file-list">
+            <div v-for="f in uploadedFiles" :key="f" class="file-row">
+              <span class="file-icon">📄</span>
+              <span class="file-name" :title="f">{{ f }}</span>
+              <div class="file-actions">
+                <a
+                  :href="`${API_BASE}/upload/${encodeURIComponent(f)}`"
+                  class="file-btn download"
+                  title="下载"
+                  download
+                >⬇</a>
+                <button
+                  class="file-btn delete"
+                  title="删除"
+                  @click="deleteUploadedFile(f)"
+                >🗑</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 已完成文件 -->
+        <section class="file-section">
+          <div class="section-title">
+            已完成文件
+            <span v-if="outputFiles.length" class="section-count">{{ outputFiles.length }}</span>
+          </div>
+          <div v-if="loadingOutput" class="file-status">
+            <span class="mini-spinner" /> 加载中…
+          </div>
+          <div v-else-if="!outputFiles.length" class="file-status empty">
+            <span>暂无完成文件</span>
+          </div>
+          <div v-else class="file-list">
+            <div v-for="f in outputFiles" :key="f" class="file-row">
+              <span class="file-icon">🎯</span>
+              <span class="file-name" :title="f">{{ f }}</span>
+              <div class="file-actions">
+                <a
+                  :href="`${API_BASE}/output/${encodeURIComponent(f)}`"
+                  class="file-btn download"
+                  title="下载"
+                  download
+                >⬇</a>
+              </div>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <!-- ===== 右栏：对话界面 ===== -->
+      <main class="right-panel">
+        <div class="chat-messages">
+          <div v-if="!messages.length" class="empty-chat">
+            <div class="empty-icon">💬</div>
+            <p>上传文件后，告诉我你想对文件做什么</p>
+            <p class="examples">
+              例如：<em>把图片反色</em> · <em>转成 mp4</em> · <em>裁剪中间 10 秒</em>
+            </p>
+          </div>
+
+          <div v-for="(msg, i) in messages" :key="i" class="msg-row" :class="msg.role">
+            <div class="avatar">{{ msg.role === 'user' ? '👤' : msg.role === 'ai' ? '🤖' : '⚙️' }}</div>
+            <div class="bubble">
+              <div class="msg-text" v-html="msg.text.replace(/\n/g, '<br>')" />
+              <div v-if="msg.outputFile" class="output-area">
+                <img
+                  v-if="isImage(msg.outputFile)"
+                  :src="`${API_BASE}/output/${encodeURIComponent(msg.outputFile)}`"
+                  class="preview-img"
+                />
+                <video
+                  v-else-if="isVideo(msg.outputFile)"
+                  :src="`${API_BASE}/output/${encodeURIComponent(msg.outputFile)}`"
+                  class="preview-video"
+                  controls
+                />
+                <a
+                  :href="`${API_BASE}/output/${encodeURIComponent(msg.outputFile)}`"
+                  class="download-link"
+                  download
+                >⬇️ 下载 {{ msg.outputFile }}</a>
+              </div>
+            </div>
+          </div>
+
+          <div ref="messagesEnd" />
         </div>
 
-        <div ref="messagesEnd" />
-      </section>
-    </main>
-
-    <!-- ── 输入栏 ── -->
-    <footer class="input-bar">
-      <textarea
-        ref="textareaRef"
-        v-model="question"
-        placeholder="输入你对文件的处理需求…"
-        rows="1"
-        :disabled="sending"
-        @keydown="onKeydown"
-        @input="autoResize"
-      />
-      <button class="send-btn" :disabled="!question.trim() || sending" @click="sendMessage">
-        <span v-if="!sending">发送</span>
-        <span v-else class="spinner-sm" />
-      </button>
-    </footer>
+        <!-- ── 输入栏 ── -->
+        <footer class="input-bar">
+          <textarea
+            ref="textareaRef"
+            v-model="question"
+            placeholder="输入你对文件的处理需求…"
+            rows="1"
+            :disabled="sending"
+            @keydown="onKeydown"
+            @input="autoResize"
+          />
+          <button class="send-btn" :disabled="!question.trim() || sending" @click="sendMessage">
+            <span v-if="!sending">发送</span>
+            <span v-else class="spinner-sm" />
+          </button>
+        </footer>
+      </main>
+    </div>
   </div>
 </template>
 
@@ -220,90 +371,190 @@ body {
 a { color: #4f6ef7; text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-/* ── Layout ── */
+/* ── App Layout ── */
 .app {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 0 16px;
 }
 
 /* ── Header ── */
 .header {
-  padding: 16px 0 8px;
+  padding: 14px 20px;
+  background: #fff;
   border-bottom: 1px solid #e5e7eb;
+  flex-shrink: 0;
 }
 .header-inner {
   display: flex;
   align-items: baseline;
   gap: 12px;
 }
-.logo { font-size: 20px; font-weight: 700; }
+.logo { font-size: 20px; font-weight: 700; color: #1a1a2e; }
 .subtitle { font-size: 13px; color: #9ca3af; }
 
-/* ── Main ── */
-.main {
+/* ── Body (two-column) ── */
+.body {
   flex: 1;
-  overflow: hidden;
   display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 12px 0;
+  overflow: hidden;
 }
 
-/* ── Upload ── */
+/* ===== Left Panel ===== */
+.left-panel {
+  width: 360px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  background: #fff;
+  border-right: 1px solid #e5e7eb;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ── Upload Zone ── */
 .upload-section { flex-shrink: 0; }
 .drop-zone {
   position: relative;
   border: 2px dashed #d1d5db;
-  border-radius: 12px;
-  padding: 20px;
+  border-radius: 10px;
+  padding: 16px;
   text-align: center;
   cursor: pointer;
   transition: all 0.2s;
-  background: #fff;
+  background: #fafbfc;
 }
 .drop-zone:hover { border-color: #4f6ef7; background: #f8f9ff; }
 .drop-zone.drag-over { border-color: #4f6ef7; background: #eef1ff; }
 .drop-zone.has-files { border-style: solid; border-color: #22c55e; background: #f0fdf4; }
-.drop-icon { display: block; font-size: 28px; margin-bottom: 4px; }
-.drop-text { display: block; font-size: 14px; font-weight: 500; color: #374151; }
-.drop-hint { display: block; font-size: 12px; color: #9ca3af; margin-top: 2px; }
+.drop-icon { display: block; font-size: 24px; margin-bottom: 2px; }
+.drop-text { display: block; font-size: 13px; font-weight: 500; color: #374151; }
 .uploading-overlay {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center; gap: 8px;
   background: rgba(255,255,255,.85);
-  border-radius: 12px;
-  font-size: 14px; color: #4f6ef7;
+  border-radius: 10px;
+  font-size: 13px; color: #4f6ef7;
 }
 .uploading-overlay .spinner {
-  width: 18px; height: 18px;
+  width: 16px; height: 16px;
   border: 2px solid #e5e7eb;
   border-top-color: #4f6ef7;
   border-radius: 50%;
   animation: spin .6s linear infinite;
 }
 
-.file-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.chip {
-  background: #eef2ff;
-  color: #4f6ef7;
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 240px;
+/* ── File Sections ── */
+.file-section { flex-shrink: 0; }
+.section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #6b7280;
+  padding: 12px 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  letter-spacing: 0.3px;
+}
+.section-count {
+  font-size: 11px;
+  font-weight: 500;
+  color: #9ca3af;
+  background: #f3f4f6;
+  padding: 1px 7px;
+  border-radius: 10px;
+  line-height: 18px;
+}
+.file-status {
+  padding: 8px 0;
+  font-size: 13px;
+  color: #9ca3af;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.file-status.empty { padding: 14px 0; text-align: center; justify-content: center; }
+
+.mini-spinner {
+  display: inline-block;
+  width: 12px; height: 12px;
+  border: 2px solid #e5e7eb;
+  border-top-color: #4f6ef7;
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
 }
 
-/* ── Chat ── */
-.chat-section {
+/* ── File List ── */
+.file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  transition: background 0.15s;
+  cursor: default;
+}
+.file-row:hover { background: #f0f2f5; }
+.file-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.file-name {
+  flex: 1;
+  font-size: 13px;
+  color: #374151;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.file-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.file-row:hover .file-actions { opacity: 1; }
+.file-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px;
+  border-radius: 4px;
+  line-height: 1;
+  transition: background 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+}
+.file-btn:hover { background: #e5e7eb; text-decoration: none; }
+.file-btn.delete:hover { background: #fee2e2; }
+
+/* ===== Right Panel ===== */
+.right-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* ── Chat Messages ── */
+.chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 0;
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -382,13 +633,14 @@ a:hover { text-decoration: underline; }
   50% { opacity: 1; transform: scale(1.2); }
 }
 
-/* ── Input ── */
+/* ── Input Bar ── */
 .input-bar {
   display: flex;
   gap: 8px;
-  padding: 12px 0 20px;
+  padding: 12px 20px 16px;
   border-top: 1px solid #e5e7eb;
   background: #f0f2f5;
+  flex-shrink: 0;
 }
 .input-bar textarea {
   flex: 1;
