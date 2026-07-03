@@ -1,7 +1,7 @@
 /.env
 /.venv
 /.omo
-/backend/data/*
+/backend/src/data/*
 __pycache__/
 *.pyc
 AGENTS.md
