@@ -1,4 +1,4 @@
-import os, sys, uuid, shutil, json, atexit, io, zipfile
+import os, sys, shutil, json, atexit, io, zipfile, datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse, Response
@@ -57,9 +57,11 @@ def _clear_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
 
-def _save_with_uuid(file: UploadFile) -> str:
+def _save_with_timestamp(file: UploadFile, seq: int) -> str:
     os.makedirs(UPLOAD_DIR, exist_ok=True)
-    name = f"{uuid.uuid4().hex}_{file.filename}"
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem, ext = os.path.splitext(file.filename or "file")
+    name = f"{stem}_{stamp}_{seq}{ext}"
     with open(os.path.join(UPLOAD_DIR, name), 'wb') as f:
         f.write(file.file.read())
     return name
@@ -67,11 +69,15 @@ def _save_with_uuid(file: UploadFile) -> str:
 
 @app.post("/api/upload")
 async def upload_files(files: list[UploadFile] = File(...)):
-    """上传一个或多个文件到 upload/，之前的文件会被清除"""
+    """上传一个或多个文件到 upload/，不会删除旧文件"""
     print('=' * 20 + '上传文件' + '=' * 20)
     print(f'文件数量：{len(files)}')
-    _clear_dir(UPLOAD_DIR)
-    saved = [_save_with_uuid(f) for f in files]
+    saved = []
+    counter = {}
+    for f in files:
+        name = f.filename or "file"
+        counter[name] = counter.get(name, 0) + 1
+        saved.append(_save_with_timestamp(f, counter[name]))
     print(f'保存文件：{saved}')
     return {"uploaded": saved}
 
