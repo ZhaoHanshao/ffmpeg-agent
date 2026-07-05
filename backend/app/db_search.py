@@ -9,7 +9,7 @@ load_dotenv()
 
 DB_DIR = os.getenv('DB_DIR')
 COLLECTION_NAME = os.getenv('COLLECTION_NAME')
-BGE_CACHE_DIR = os.getenv('BGE_CACHE_DIR', 'backend/src/data/bge_small')
+BGE_CACHE_DIR = os.getenv('BGE_CACHE_DIR', 'backend/data/bge_small')
 BGE_MODEL_NAME = os.getenv('BGE_MODEL_NAME', 'BAAI/bge-small-zh-v1.5')
 HF_ENDPOINT = os.getenv('HF_ENDPOINT', '')
 

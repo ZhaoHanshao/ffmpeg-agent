@@ -185,7 +185,7 @@ Successfully tagged ffmpeg-agent:latest
 docker run -d `
   --name ffmpeg-agent `
   -p 8080:8000 `
-  -e API_KEY="你的智谱AI密钥" `
+  -e API_KEY="你的OpenAI API密钥" `
   ffmpeg-agent
 ```
 
@@ -287,7 +287,7 @@ docker build -t ffmpeg-agent .
 docker run -d `
   --name ffmpeg-agent `
   -p 8080:8000 `
-  -e API_KEY="你的智谱AI密钥" `
+  -e API_KEY="你的OpenAI API密钥" `
   ffmpeg-agent
 ```
 
@@ -335,7 +335,7 @@ docker build -t ffmpeg-agent .
 3. 确认端口映射正确：`docker ps` 应该看到 `0.0.0.0:8080 -> 8000/tcp`
 4. 确保 Docker Desktop 已经启动（右下角图标是绿色的）
 
-### Q: 容器内需要联网访问智谱AI API
+### Q: 容器内需要联网访问大模型 API
 
 默认容器可以访问外网，只要你的宿主机能联网就行。如果使用了公司代理，需要在运行容器时添加代理环境变量：
 
@@ -343,7 +343,7 @@ docker build -t ffmpeg-agent .
 docker run -d `
   --name ffmpeg-agent `
   -p 8080:8000 `
-  -e API_KEY="你的智谱AI密钥" `
+  -e API_KEY="你的OpenAI API密钥" `
   -e HTTP_PROXY="http://代理地址:端口" `
   -e HTTPS_PROXY="http://代理地址:端口" `
   ffmpeg-agent
@@ -357,7 +357,7 @@ docker run -d `
 docker run -d `
   --name ffmpeg-agent `
   -p 8080:8000 `
-  -e API_KEY="你的智谱AI密钥" `
+  -e API_KEY="你的OpenAI API密钥" `
   -v E:\code\ffmpeg-agent\backend\upload:/app/backend/upload `
   -v E:\code\ffmpeg-agent\backend\download:/app/backend/download `
   ffmpeg-agent
