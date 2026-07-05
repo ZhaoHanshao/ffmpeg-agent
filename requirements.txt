@@ -3,8 +3,12 @@ langgraph
 langchain_openai
 python-dotenv
 langchain_chroma
+langchain_text_splitters
 chromadb
 sentence-transformers
 fastapi
 uvicorn
 python-multipart
+beautifulsoup4
+lxml
+requests

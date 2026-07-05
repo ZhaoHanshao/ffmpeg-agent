@@ -1,7 +1,7 @@
-import os, sys, uuid, shutil, json, atexit
+import os, sys, uuid, shutil, json, atexit, io, zipfile
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 # 确保 CWD 指向项目根目录，使后续 import 和 load_dotenv() 的路径正确
@@ -40,6 +40,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def preload_models():
+    print('=' * 20 + '预加载模型和向量库' + '=' * 20)
+    from app.db_search import _ensure_vector_db, _get_vector_db
+    _ensure_vector_db()
+    _get_vector_db()
+    print('=' * 20 + '预加载完成' + '=' * 20)
 
 
 def _clear_dir(path: str):
@@ -122,6 +131,50 @@ async def list_output():
     return {"files": files}
 
 
+@app.delete("/api/output/{filename:path}")
+async def delete_output(filename: str):
+    """删除 download/ 中的已完成文件"""
+    print('=' * 20 + '删除已完成文件' + '=' * 20)
+    print(f'文件名：{filename}')
+    path = os.path.join(DOWNLOAD_DIR, filename)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    os.remove(path)
+    return {"deleted": filename}
+
+
+@app.post("/api/output/delete")
+async def batch_delete_output(body: dict):
+    """批量删除输出文件：POST {"files": ["a.mp4", "b.jpg"]}"""
+    files = body.get("files", [])
+    results = {"deleted": [], "not_found": []}
+    for f in files:
+        path = os.path.join(DOWNLOAD_DIR, f)
+        if os.path.exists(path):
+            os.remove(path)
+            results["deleted"].append(f)
+        else:
+            results["not_found"].append(f)
+    return results
+
+
+@app.post("/api/output/download")
+async def batch_download_output(body: dict):
+    """批量下载输出文件为 ZIP：POST {"files": ["a.mp4", "b.jpg"]}"""
+    files = body.get("files", [])
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            path = os.path.join(DOWNLOAD_DIR, f)
+            if os.path.exists(path):
+                zf.write(path, arcname=f)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=outputs.zip"},
+    )
+
+
 @app.get("/api/output/{filename:path}")
 async def get_output(filename: str):
     """返回 download/ 中的文件"""
@@ -167,6 +220,8 @@ async def delete_uploaded(filename: str):
     print(f'删除成功：{filename}')
     return {"deleted": filename}
 
+from fastapi.staticfiles import StaticFiles
+app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
 
 if __name__ == '__main__':
     import uvicorn

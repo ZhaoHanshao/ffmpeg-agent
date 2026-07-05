@@ -1,5 +1,5 @@
 <script setup>
-import { ref, nextTick, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted } from 'vue'
 
 const API_BASE = '/api'
 
@@ -13,10 +13,90 @@ const sending = ref(false)
 const dragOver = ref(false)
 const loadingUpload = ref(false)
 const loadingOutput = ref(false)
+const selectedOutput = ref(new Set())
+const batchProcessing = ref(false)
 
 const messagesEnd = ref(null)
 const fileInput = ref(null)
 const textareaRef = ref(null)
+
+const allOutputSelected = computed(() =>
+  outputFiles.value.length > 0 && selectedOutput.value.size === outputFiles.value.length
+)
+
+function toggleOutputFile(file) {
+  const s = new Set(selectedOutput.value)
+  s.has(file) ? s.delete(file) : s.add(file)
+  selectedOutput.value = s
+}
+
+function toggleSelectAllOutput() {
+  if (selectedOutput.value.size === outputFiles.value.length) {
+    selectedOutput.value = new Set()
+  } else {
+    selectedOutput.value = new Set(outputFiles.value)
+  }
+}
+
+async function deleteOutputFile(filename) {
+  try {
+    const res = await fetch(`${API_BASE}/output/${encodeURIComponent(filename)}`, { method: 'DELETE' })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const s = new Set(selectedOutput.value)
+    s.delete(filename)
+    selectedOutput.value = s
+    await refreshOutputFiles()
+  } catch (e) {
+    messages.value.push({ role: 'system', text: `删除失败: ${e.message}` })
+  }
+}
+
+async function deleteSelectedOutput() {
+  const files = [...selectedOutput.value]
+  if (!files.length) return
+  batchProcessing.value = true
+  try {
+    const res = await fetch(`${API_BASE}/output/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    selectedOutput.value = new Set()
+    await refreshOutputFiles()
+  } catch (e) {
+    messages.value.push({ role: 'system', text: `批量删除失败: ${e.message}` })
+  } finally {
+    batchProcessing.value = false
+  }
+}
+
+async function downloadSelectedOutput() {
+  const files = [...selectedOutput.value]
+  if (!files.length) return
+  batchProcessing.value = true
+  try {
+    const res = await fetch(`${API_BASE}/output/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'outputs.zip'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    messages.value.push({ role: 'system', text: `批量下载失败: ${e.message}` })
+  } finally {
+    batchProcessing.value = false
+  }
+}
 
 function autoResize() {
   const el = textareaRef.value
@@ -242,28 +322,30 @@ onMounted(() => {
             已上传文件
             <span v-if="uploadedFiles.length" class="section-count">{{ uploadedFiles.length }}</span>
           </div>
-          <div v-if="loadingUpload" class="file-status">
-            <span class="mini-spinner" /> 加载中…
-          </div>
-          <div v-else-if="!uploadedFiles.length" class="file-status empty">
-            <span>暂无上传文件</span>
-          </div>
-          <div v-else class="file-list">
-            <div v-for="f in uploadedFiles" :key="f" class="file-row">
-              <span class="file-icon">📄</span>
-              <span class="file-name" :title="f">{{ f }}</span>
-              <div class="file-actions">
-                <a
-                  :href="`${API_BASE}/upload/${encodeURIComponent(f)}`"
-                  class="file-btn download"
-                  title="下载"
-                  download
-                >⬇</a>
-                <button
-                  class="file-btn delete"
-                  title="删除"
-                  @click="deleteUploadedFile(f)"
-                >🗑</button>
+          <div class="file-section-body">
+            <div v-if="loadingUpload" class="file-status">
+              <span class="mini-spinner" /> 加载中…
+            </div>
+            <div v-else-if="!uploadedFiles.length" class="file-status empty">
+              <span>暂无上传文件</span>
+            </div>
+            <div v-else class="file-list">
+              <div v-for="f in uploadedFiles" :key="f" class="file-row">
+                <span class="file-icon">📄</span>
+                <span class="file-name" :title="f">{{ f }}</span>
+                <div class="file-actions">
+                  <a
+                    :href="`${API_BASE}/upload/${encodeURIComponent(f)}`"
+                    class="file-btn download"
+                    title="下载"
+                    download
+                  >⬇</a>
+                  <button
+                    class="file-btn delete"
+                    title="删除"
+                    @click="deleteUploadedFile(f)"
+                  >🗑</button>
+                </div>
               </div>
             </div>
           </div>
@@ -272,27 +354,68 @@ onMounted(() => {
         <!-- 已完成文件 -->
         <section class="file-section">
           <div class="section-title">
+            <label class="select-all" v-if="outputFiles.length" @click.stop>
+              <input
+                type="checkbox"
+                :checked="allOutputSelected"
+                @change="toggleSelectAllOutput"
+              />
+            </label>
             已完成文件
             <span v-if="outputFiles.length" class="section-count">{{ outputFiles.length }}</span>
           </div>
-          <div v-if="loadingOutput" class="file-status">
-            <span class="mini-spinner" /> 加载中…
-          </div>
-          <div v-else-if="!outputFiles.length" class="file-status empty">
-            <span>暂无完成文件</span>
-          </div>
-          <div v-else class="file-list">
-            <div v-for="f in outputFiles" :key="f" class="file-row">
-              <span class="file-icon">🎯</span>
-              <span class="file-name" :title="f">{{ f }}</span>
-              <div class="file-actions">
-                <a
-                  :href="`${API_BASE}/output/${encodeURIComponent(f)}`"
-                  class="file-btn download"
-                  title="下载"
-                  download
-                >⬇</a>
+          <div class="file-section-body">
+            <div v-if="loadingOutput" class="file-status">
+              <span class="mini-spinner" /> 加载中…
+            </div>
+            <div v-else-if="!outputFiles.length" class="file-status empty">
+              <span>暂无完成文件</span>
+            </div>
+            <div v-else class="file-list">
+              <div
+                v-for="f in outputFiles"
+                :key="f"
+                class="file-row"
+                :class="{ selected: selectedOutput.has(f) }"
+                @click="toggleOutputFile(f)"
+              >
+                <span
+                  class="file-checkbox"
+                  :class="{ checked: selectedOutput.has(f) }"
+                  @click.stop="toggleOutputFile(f)"
+                />
+                <span class="file-icon">🎯</span>
+                <span class="file-name" :title="f">{{ f }}</span>
+                <div class="file-actions">
+                  <a
+                    :href="`${API_BASE}/output/${encodeURIComponent(f)}`"
+                    class="file-btn download"
+                    title="下载"
+                    download
+                    @click.stop
+                  >⬇</a>
+                  <button
+                    class="file-btn delete"
+                    title="删除"
+                    @click.stop="deleteOutputFile(f)"
+                  >🗑</button>
+                </div>
               </div>
+            </div>
+          </div>
+          <div v-if="selectedOutput.size > 0" class="batch-bar">
+            <span class="batch-count">已选 {{ selectedOutput.size }} 项</span>
+            <div class="batch-actions">
+              <button
+                class="batch-btn download"
+                :disabled="batchProcessing"
+                @click="downloadSelectedOutput"
+              >⬇ 下载选中</button>
+              <button
+                class="batch-btn delete"
+                :disabled="batchProcessing"
+                @click="deleteSelectedOutput"
+              >🗑 删除选中</button>
             </div>
           </div>
         </section>
@@ -404,10 +527,10 @@ a:hover { text-decoration: underline; }
 .left-panel {
   width: 360px;
   flex-shrink: 0;
-  overflow-y: auto;
+  overflow: hidden;
   background: #fff;
   border-right: 1px solid #e5e7eb;
-  padding: 16px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -446,12 +569,23 @@ a:hover { text-decoration: underline; }
 }
 
 /* ── File Sections ── */
-.file-section { flex-shrink: 0; }
+.file-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.file-section-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
 .section-title {
   font-size: 13px;
   font-weight: 600;
   color: #6b7280;
-  padding: 12px 0 6px;
+  padding: 8px 0 4px;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -522,7 +656,8 @@ a:hover { text-decoration: underline; }
   opacity: 0;
   transition: opacity 0.15s;
 }
-.file-row:hover .file-actions { opacity: 1; }
+.file-row:hover .file-actions,
+.file-row.selected .file-actions { opacity: 1; }
 .file-btn {
   background: none;
   border: none;
@@ -540,6 +675,84 @@ a:hover { text-decoration: underline; }
 }
 .file-btn:hover { background: #e5e7eb; text-decoration: none; }
 .file-btn.delete:hover { background: #fee2e2; }
+
+/* ── File Checkbox ── */
+.file-checkbox {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #d1d5db;
+  border-radius: 3px;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+}
+.file-checkbox.checked {
+  background: #4f6ef7;
+  border-color: #4f6ef7;
+}
+.file-checkbox.checked::after {
+  content: '';
+  width: 4px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) translateY(-1px);
+}
+.file-row:hover .file-checkbox { border-color: #4f6ef7; }
+.file-row.selected { background: #eef1ff; }
+.file-row.selected:hover { background: #e0e5ff; }
+
+/* ── Select All Checkbox ── */
+.select-all { display: flex; align-items: center; cursor: pointer; }
+.select-all input {
+  width: 14px;
+  height: 14px;
+  accent-color: #4f6ef7;
+  cursor: pointer;
+}
+
+/* ── Batch Action Bar ── */
+.batch-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #fff;
+  border-top: 1px solid #e5e7eb;
+  margin: 0 -12px -12px;
+  box-shadow: 0 -2px 8px rgba(0,0,0,.06);
+}
+.batch-count {
+  font-size: 12px;
+  color: #374151;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.batch-actions {
+  display: flex;
+  gap: 6px;
+}
+.batch-btn {
+  padding: 5px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  background: #fff;
+  white-space: nowrap;
+}
+.batch-btn:hover:not(:disabled) { border-color: #4f6ef7; color: #4f6ef7; }
+.batch-btn.download:hover:not(:disabled) { background: #eef1ff; }
+.batch-btn.delete:hover:not(:disabled) { background: #fef2f2; border-color: #ef4444; color: #ef4444; }
+.batch-btn:disabled { opacity: .4; cursor: not-allowed; }
 
 /* ===== Right Panel ===== */
 .right-panel {

@@ -24,10 +24,10 @@ docker --version
 
 在项目根目录（`E:\code\ffmpeg-agent\`）下，你需要创建 2 个文件，修改 1 个文件：
 
-| 文件 | 操作 | 说明 |
-|---|---|---|
-| `.dockerignore` | **新建** | 告诉 Docker 构建镜像时忽略哪些文件 |
-| `Dockerfile` | **新建** | 告诉 Docker 如何构建镜像 |
+| 文件                    | 操作           | 说明                                       |
+| ----------------------- | -------------- | ------------------------------------------ |
+| `.dockerignore`       | **新建** | 告诉 Docker 构建镜像时忽略哪些文件         |
+| `Dockerfile`          | **新建** | 告诉 Docker 如何构建镜像                   |
 | `backend/app/main.py` | **修改** | 添加一行代码，让后端服务器同时托管前端页面 |
 
 ---
@@ -89,17 +89,17 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 **逐行解释：**
 
-| 指令 | 说明 |
-|---|---|
-| `FROM python:3.10-slim` | 使用 Python 3.10 的精简版镜像作为基础 |
-| `RUN apt-get update ... ffmpeg` | 安装 ffmpeg 命令行工具（你的项目需要它处理音视频） |
-| `WORKDIR /app` | 设置容器内的工作目录为 `/app` |
-| `COPY requirements.txt .` | 先把依赖文件复制进去（这一步单独写，是为了利用 Docker 缓存） |
-| `RUN pip install ...` | 安装 Python 依赖包 |
-| `COPY . .` | 把项目所有文件复制到容器内 |
-| `RUN mkdir -p ...` | 创建上传和下载目录 |
-| `EXPOSE 8000` | 声明容器会监听 8000 端口（仅作为文档说明） |
-| `CMD [...]` | 容器启动时执行的命令：启动 uvicorn 服务器 |
+| 指令                              | 说明                                                         |
+| --------------------------------- | ------------------------------------------------------------ |
+| `FROM python:3.10-slim`         | 使用 Python 3.10 的精简版镜像作为基础                        |
+| `RUN apt-get update ... ffmpeg` | 安装 ffmpeg 命令行工具（你的项目需要它处理音视频）           |
+| `WORKDIR /app`                  | 设置容器内的工作目录为`/app`                               |
+| `COPY requirements.txt .`       | 先把依赖文件复制进去（这一步单独写，是为了利用 Docker 缓存） |
+| `RUN pip install ...`           | 安装 Python 依赖包                                           |
+| `COPY . .`                      | 把项目所有文件复制到容器内                                   |
+| `RUN mkdir -p ...`              | 创建上传和下载目录                                           |
+| `EXPOSE 8000`                   | 声明容器会监听 8000 端口（仅作为文档说明）                   |
+| `CMD [...]`                     | 容器启动时执行的命令：启动 uvicorn 服务器                    |
 
 ---
 
@@ -155,11 +155,13 @@ cd E:\code\ffmpeg-agent
 docker build -t ffmpeg-agent .
 ```
 
-| 参数 | 说明 |
-|---|---|
-| `build` | 构建镜像 |
+| 参数                | 说明                                 |
+| ------------------- | ------------------------------------ |
+| `build`           | 构建镜像                             |
 | `-t ffmpeg-agent` | 给镜像打上标签（名字），方便后续引用 |
-| `.` | 使用当前目录下的 Dockerfile 来构建 |
+| `.`               | 使用当前目录下的 Dockerfile 来构建   |
+
+> **说明：** Dockerfile 中 apt 和 pip 已配置清华镜像源，国内可直接访问，无需 `--build-arg` 代理。`docker pull` 拉取基础镜像如果慢，需配置 Docker 守护进程代理（见常见问题）。
 
 **首次构建需要多久？**
 
@@ -189,14 +191,14 @@ docker run -d `
 
 **逐参数解释：**
 
-| 参数 | 说明 |
-|---|---|
-| `run` | 运行容器 |
-| `-d` | 后台运行（detached），关掉终端也不会停止 |
-| `--name ffmpeg-agent` | 给容器起个名字，方便后续管理 |
-| `-p 8080:8000` | 端口映射：访问本机 8080 端口 = 访问容器内的 8000 端口 |
-| `-e API_KEY="..."` | 设置环境变量**覆盖** `.env` 中的值（避免 API 密钥写在镜像里） |
-| `ffmpeg-agent` | 使用哪个镜像来创建容器 |
+| 参数                    | 说明                                                                  |
+| ----------------------- | --------------------------------------------------------------------- |
+| `run`                 | 运行容器                                                              |
+| `-d`                  | 后台运行（detached），关掉终端也不会停止                              |
+| `--name ffmpeg-agent` | 给容器起个名字，方便后续管理                                          |
+| `-p 8080:8000`        | 端口映射：访问本机 8080 端口 = 访问容器内的 8000 端口                 |
+| `-e API_KEY="..."`    | 设置环境变量**覆盖** `.env` 中的值（避免 API 密钥写在镜像里） |
+| `ffmpeg-agent`        | 使用哪个镜像来创建容器                                                |
 
 **运行成功后你会看到：**
 
@@ -301,6 +303,31 @@ docker run -d `
 RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
+或者启用 Docker 守护进程代理（见下一条）。
+
+### Q: 拉取基础镜像（`FROM python:...`）很慢 / 超时
+
+`docker pull`（拉取基础镜像）走的是 Docker 守护进程网络，**不受 Dockerfile 内的设置影响**。需要给 Docker 守护进程配置代理：
+
+1. 打开 Docker Desktop → Settings → Resources → Proxies
+2. 填写：
+   - HTTP proxy: `http://127.0.0.1:7897`
+   - HTTPS proxy: `http://127.0.0.1:7897`
+   - No proxy: `localhost,127.0.0.1,::1`
+3. Apply & Restart
+
+之后 `docker build` 拉取基础镜像也会走代理。
+
+如果不想改全局设置，也可以只对这次构建临时生效（**管理员 PowerShell**）：
+
+```powershell
+$env:HTTP_PROXY="http://127.0.0.1:7897"
+$env:HTTPS_PROXY="http://127.0.0.1:7897"
+docker build -t ffmpeg-agent .
+```
+
+> 注意：环境变量方式不一定对所有 Docker 版本生效，最保险还是 Docker Desktop 的设置。
+
 ### Q: 运行后浏览器无法访问
 
 1. 检查容器是否在运行：`docker ps`，看 `ffmpeg-agent` 是否在列表中
@@ -348,6 +375,56 @@ docker run -d `
 - ffmpeg 及其依赖 ~ 数十 MB
 
 可以后续使用多阶段构建（multi-stage build）来优化，但初学者可以先忽略。
+
+---
+
+## Clash 代理规则配置
+
+要让 Docker 正确走 Clash 代理，需要在 Clash 中添加规则或使用代理模式。
+
+### 方法 1：使用全局代理（最简单）
+
+在 Clash 面板中切到 **Global**（全局）模式，所有流量都走代理。构建完切回 Rule 模式即可。
+
+### 方法 2：配置规则（推荐）
+
+Clash 的规则文件通常位于 Clash 安装目录下的 `config.yaml`（或 Clash Verge / Clash Meta 等客户端的订阅配置中）。添加以下规则让 Docker 相关域名走代理：
+
+```yaml
+# Docker 镜像拉取走代理
+- DOMAIN-SUFFIX,docker.io,PROXY
+- DOMAIN-SUFFIX,registry-1.docker.io,PROXY
+- DOMAIN-SUFFIX,production.cloudflare.docker.com,PROXY
+- DOMAIN-SUFFIX,pypi.org,PROXY
+- DOMAIN-SUFFIX,storage.googleapis.com,PROXY
+- DOMAIN-SUFFIX,github.com,PROXY
+- DOMAIN-SUFFIX,githubusercontent.com,PROXY
+```
+
+如果你使用 **Clash Verge** 或 **Clash Nyanpasu** 等图形客户端：
+
+1. 打开客户端界面 → **设置 / Settings** → **规则 / Rules**
+2. 点击编辑 / 添加规则，粘贴上面的内容
+3. 保存并重载配置
+
+如果使用 **Mihomo Party / Clash Meta**：
+
+1. 打开 Dashboard → 配置 → 编辑配置文件
+2. 在 `rules:` 字段下添加上述规则
+3. 保存并重载
+
+> **技巧：** 你不需要添加所有域名，只要把模式设为 **Rule**，然后在 Clash 日志中观察 `docker build` 时访问了哪些域名，逐个添加即可。或者直接用 **Global 模式** 省事。
+
+### 验证代理是否生效
+
+查看容器内 IP 是否走了代理出口：
+
+```powershell
+# 构建成功后，查看容器网络
+docker run --rm -it ffmpeg-agent curl -s ifconfig.me
+```
+
+如果返回的 IP 不是你本地的，说明代理生效。
 
 ---
 

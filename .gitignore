@@ -8,3 +8,4 @@ AGENTS.md
 node_modules/
 backend/download/*
 backend/upload/*
+/.dockerignore
