@@ -6,8 +6,8 @@ import os, subprocess, shlex
 
 load_dotenv()
 
-DOWNLOAD = os.getenv('DOWNLOAD')
-UPLOAD = os.getenv('UPLOAD')
+DOWNLOAD = os.getenv('DOWNLOAD', 'backend/download')
+UPLOAD = os.getenv('UPLOAD', 'backend/upload')
 
 
 @tool
@@ -92,7 +92,7 @@ def execute_command(command: str):
     try:
         exit_code = subprocess.run(args=shlex.split(command), capture_output=True)
         if exit_code.returncode == 0:
-            return {'command': command, 'flag': True}
+            return {'command': command, 'flag': True, 'command_result': f'{command} 执行成功'}
         else:
             return {
                 'command': command,

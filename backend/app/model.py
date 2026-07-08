@@ -14,4 +14,5 @@ model = ChatOpenAI(
     api_key=API_KEY,
     temperature=0.2,
     max_tokens=2048,
+    streaming=True,
 )

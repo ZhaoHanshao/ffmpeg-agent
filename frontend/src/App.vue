@@ -224,6 +224,8 @@ async function sendMessage() {
             scrollBottom()
           } else if (data.event === 'meta' && data.output_file) {
             reply.outputFile = data.output_file
+          } else if (data.event === 'error') {
+            reply.text += `\n[错误] ${data.text}`
           }
         } catch {
           // 跳过不完整的 JSON

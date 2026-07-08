@@ -52,4 +52,5 @@ agent_chat = create_agent(
         '5. 适当引用执行日志中的关键信息\n'
         '6. 使用中文、语气友好'
     )),
+    tools=[],
 )
