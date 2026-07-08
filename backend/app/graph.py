@@ -1,7 +1,9 @@
-import os, shlex, json
+import os, shlex, json, logging
 from app.agents import agent_chat, agent_execute, agent_search
 from langgraph.graph import START, END, StateGraph, MessagesState
 from langchain.messages import ToolMessage, AnyMessage, AIMessage, HumanMessage
+
+logger = logging.getLogger(__name__)
 
 
 class state(MessagesState):
@@ -11,10 +13,17 @@ class state(MessagesState):
     history: list[AnyMessage] = None
     flag: bool = False
     output_file: str = ''
+    search_count: int = 0
 
 
 def search(state: state):
-    print('=' * 20 + '执行查询' + '=' * 20)
+    if state.get('search_count', 0) >= 10:
+        logger.info('查询次数已达上限（10 次），跳过后续查询')
+        return {
+            **state,
+            'result': ['已达到最大查询次数（10 次），请基于现有信息继续'],
+        }
+    logger.info('执行查询')
     mes = state['messages']
     state['history'] = mes
     if state['flag']:
@@ -24,11 +33,12 @@ def search(state: state):
     else:
         res = agent_search.invoke({'messages': mes})
     state['result'] = res['messages'][-1].content
+    state['search_count'] = state.get('search_count', 0) + 1
     return state
 
 
 def execute(state: state):
-    print('=' * 20 + '执行命令' + '=' * 20)
+    logger.info('执行命令')
     user_question = state['history'][0].content if state.get('history') else ''
     execute_prompt = (
         f'用户问题：{user_question}\n\n'
@@ -56,9 +66,8 @@ def execute(state: state):
 
 
 def which_continue_exec(state: state):
-    """执行阶段的路由：flag=False 继续执行，否则结束"""
     branch = END if state['flag'] else 'execute'
-    print('=' * 20 + f'路由决策：{branch}' + '=' * 20)
+    logger.info(f'路由决策：{branch}')
     return branch
 
 
@@ -76,9 +85,7 @@ exec_workflow.add_conditional_edges(
 
 
 def exec_graph(question: str) -> dict:
-    """运行 search+execute 执行循环，返回执行后的状态字典。"""
-    print('=' * 20 + '开始执行' + '=' * 20)
-    print(f'用户问题：{question}')
+    logger.info(f'开始执行，用户问题：{question}')
     compiled = exec_workflow.compile()
     result = compiled.invoke({
         "messages": [HumanMessage(content=question)],
@@ -88,6 +95,7 @@ def exec_graph(question: str) -> dict:
         "history": [],
         "flag": False,
         "output_file": "",
+        "search_count": 0,
     })
     return result
 
@@ -115,6 +123,6 @@ if __name__ == '__main__':
     prompt = build_chat_prompt(exec_state)
     res = agent_chat.invoke({'messages': [HumanMessage(content=prompt)]})
     reply = res['messages'][-1].content if 'messages' in res else str(res)
-    print(f"AI: {reply}")
+    logger.info(f"AI: {reply}")
     if exec_state.get('output_file'):
-        print(f"输出文件: {exec_state['output_file']}")
+        logger.info(f"输出文件: {exec_state['output_file']}")

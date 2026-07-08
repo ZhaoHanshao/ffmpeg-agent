@@ -1,11 +1,14 @@
+import logging
 import requests
 from bs4 import BeautifulSoup
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+logger = logging.getLogger(__name__)
+
 
 def fetch_and_chunk(url: str) -> list[Document]:
-    print(f'正在获取文档: {url}')
+    logger.info(f'正在获取文档: {url}')
     resp = requests.get(url, timeout=120, headers={
         'User-Agent': 'Mozilla/5.0 (compatible; FFmpeg-Agent/1.0)'
     })
@@ -57,5 +60,5 @@ def fetch_and_chunk(url: str) -> list[Document]:
                 metadata={'source': url, 'title': title}
             ))
 
-    print(f'解析完成: 共 {len(docs)} 个文档片段')
+    logger.info(f'解析完成: 共 {len(docs)} 个文档片段')
     return docs

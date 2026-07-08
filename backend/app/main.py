@@ -1,8 +1,10 @@
-import os, sys, shutil, json, atexit, io, zipfile, datetime
+import os, sys, shutil, json, atexit, io, zipfile, datetime, logging
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+
+logger = logging.getLogger(__name__)
 
 # 确保 CWD 指向项目根目录，使后续 import 和 load_dotenv() 的路径正确
 _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,11 +46,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 def preload_models():
-    print('=' * 20 + '预加载模型和向量库' + '=' * 20)
+    logger.info('预加载模型和向量库')
     from app.db_search import _ensure_vector_db, _get_vector_db
     _ensure_vector_db()
     _get_vector_db()
-    print('=' * 20 + '预加载完成' + '=' * 20)
+    logger.info('预加载完成')
 
 
 def _clear_dir(path: str):
@@ -70,23 +72,23 @@ def _save_with_timestamp(file: UploadFile, seq: int) -> str:
 @app.post("/api/upload")
 async def upload_files(files: list[UploadFile] = File(...)):
     """上传一个或多个文件到 upload/，不会删除旧文件"""
-    print('=' * 20 + '上传文件' + '=' * 20)
-    print(f'文件数量：{len(files)}')
+    logger.info('上传文件')
+    logger.info(f'文件数量：{len(files)}')
     saved = []
     counter = {}
     for f in files:
         name = f.filename or "file"
         counter[name] = counter.get(name, 0) + 1
         saved.append(_save_with_timestamp(f, counter[name]))
-    print(f'保存文件：{saved}')
+    logger.info(f'保存文件：{saved}')
     return {"uploaded": saved}
 
 
 @app.post("/api/chat")
 async def chat(question: str = Form(...)):
     """发送问题 → 执行 search+execute 循环 → 流式输出 chat 回复"""
-    print('=' * 20 + '处理对话' + '=' * 20)
-    print(f'用户问题：{question[:200]}')
+    logger.info('处理对话')
+    logger.info(f'用户问题：{question[:200]}')
 
     # Step 1: 执行 search+execute 循环（同步）
     exec_state = exec_graph(question)
@@ -119,9 +121,9 @@ async def chat(question: str = Form(...)):
         yield "data: {\"event\": \"done\"}\n\n"
 
         if full_text:
-            print(f'AI回复：{full_text[:200]}')
+            logger.info(f'AI回复：{full_text[:200]}')
         if output_file:
-            print(f'输出文件：{output_file}')
+            logger.info(f'输出文件：{output_file}')
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -129,19 +131,19 @@ async def chat(question: str = Form(...)):
 @app.get("/api/output")
 async def list_output():
     """列出 download/ 中的已完成文件"""
-    print('=' * 20 + '列出已完成文件' + '=' * 20)
+    logger.info('列出已完成文件')
     if not os.path.exists(DOWNLOAD_DIR):
         return {"files": []}
     files = [f for f in os.listdir(DOWNLOAD_DIR) if os.path.isfile(os.path.join(DOWNLOAD_DIR, f))]
-    print(f'文件列表：{files}')
+    logger.info(f'文件列表：{files}')
     return {"files": files}
 
 
 @app.delete("/api/output/{filename:path}")
 async def delete_output(filename: str):
     """删除 download/ 中的已完成文件"""
-    print('=' * 20 + '删除已完成文件' + '=' * 20)
-    print(f'文件名：{filename}')
+    logger.info('删除已完成文件')
+    logger.info(f'文件名：{filename}')
     path = os.path.join(DOWNLOAD_DIR, filename)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="文件不存在")
@@ -184,8 +186,8 @@ async def batch_download_output(body: dict):
 @app.get("/api/output/{filename:path}")
 async def get_output(filename: str):
     """返回 download/ 中的文件"""
-    print('=' * 20 + '下载已完成文件' + '=' * 20)
-    print(f'文件名：{filename}')
+    logger.info('下载已完成文件')
+    logger.info(f'文件名：{filename}')
     path = os.path.join(DOWNLOAD_DIR, filename)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="文件不存在")
@@ -195,19 +197,19 @@ async def get_output(filename: str):
 @app.get("/api/upload")
 async def list_uploaded():
     """列出 upload/ 中的文件"""
-    print('=' * 20 + '列出上传文件' + '=' * 20)
+    logger.info('列出上传文件')
     if not os.path.exists(UPLOAD_DIR):
         return {"files": []}
     files = [f for f in os.listdir(UPLOAD_DIR) if os.path.isfile(os.path.join(UPLOAD_DIR, f))]
-    print(f'文件列表：{files}')
+    logger.info(f'文件列表：{files}')
     return {"files": files}
 
 
 @app.get("/api/upload/{filename:path}")
 async def get_uploaded(filename: str):
     """返回 upload/ 中的文件供下载"""
-    print('=' * 20 + '下载上传文件' + '=' * 20)
-    print(f'文件名：{filename}')
+    logger.info('下载上传文件')
+    logger.info(f'文件名：{filename}')
     path = os.path.join(UPLOAD_DIR, filename)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="文件不存在")
@@ -217,13 +219,13 @@ async def get_uploaded(filename: str):
 @app.delete("/api/upload/{filename:path}")
 async def delete_uploaded(filename: str):
     """删除 upload/ 中的文件"""
-    print('=' * 20 + '删除上传文件' + '=' * 20)
-    print(f'文件名：{filename}')
+    logger.info('删除上传文件')
+    logger.info(f'文件名：{filename}')
     path = os.path.join(UPLOAD_DIR, filename)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="文件不存在")
     os.remove(path)
-    print(f'删除成功：{filename}')
+    logger.info(f'删除成功：{filename}')
     return {"deleted": filename}
 
 from fastapi.staticfiles import StaticFiles

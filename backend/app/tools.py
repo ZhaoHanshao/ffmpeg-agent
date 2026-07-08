@@ -2,9 +2,11 @@ from langchain.tools import tool
 from langchain_core.runnables import RunnableConfig
 from app.db_search import get_text
 from dotenv import load_dotenv
-import os, subprocess, shlex
+import os, subprocess, shlex, logging
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 DOWNLOAD = os.getenv('DOWNLOAD', 'backend/download')
 UPLOAD = os.getenv('UPLOAD', 'backend/upload')
@@ -17,8 +19,8 @@ def get_command(squry: str):
     squry:用户的问题
     返回的结果为列表，包括按相关度排序的序号和具体内容
     """
-    print('=' * 20 + '查询知识库' + '=' * 20)
-    print(f'查询内容：{squry[:200]}')
+    logger.info('查询知识库')
+    logger.info(f'查询内容：{squry[:200]}')
     result = get_text(squry)
     contents = []
     for i, doc in enumerate(result, 1):
@@ -36,7 +38,7 @@ def get_files(config: RunnableConfig):
     返回结果：第一个为要处理的文件，即在ffmpeg命令中 -i 后跟着的input
               第二个为处理后的文件存放的地址
     """
-    print('=' * 20 + '获取文件列表' + '=' * 20)
+    logger.info('获取文件列表')
     os.makedirs(UPLOAD, exist_ok=True)
     files = os.listdir(UPLOAD)
     for i, file in enumerate(files, 0):
@@ -56,13 +58,13 @@ def execute_command(command: str):
     command:标准的终端ffmpeg执行命令，例如:ffmpeg -i input.mp4 output.avi
     返回中文常规执行结果
     """
-    print('=' * 20 + '执行命令' + '=' * 20)
-    print(f'原始命令：{command}')
+    logger.info('执行命令')
+    logger.info(f'原始命令：{command}')
 
     # 安全校验：只允许以 ffmpeg 开头的命令
     cmd_name = shlex.split(command)[0]
     if cmd_name != 'ffmpeg':
-        print(f'拒绝执行非 ffmpeg 命令：{cmd_name}')
+        logger.info(f'拒绝执行非 ffmpeg 命令：{cmd_name}')
         return {
             'command': command,
             'command_result': f'拒绝执行非 ffmpeg 命令：{cmd_name}。请直接使用 ffmpeg 命令完成任务。',
@@ -85,9 +87,9 @@ def execute_command(command: str):
         if DOWNLOAD not in original and DOWNLOAD not in os.path.dirname(original):
             parts[output_idx] = os.path.join(DOWNLOAD, os.path.basename(original))
             command = shlex.join(parts)
-            print(f'输出路径已重写至 {DOWNLOAD}/')
+            logger.info(f'输出路径已重写至 {DOWNLOAD}/')
 
-    print(f'执行命令：{command}')
+    logger.info(f'执行命令：{command}')
     os.makedirs(DOWNLOAD, exist_ok=True)
     try:
         exit_code = subprocess.run(args=shlex.split(command), capture_output=True)
