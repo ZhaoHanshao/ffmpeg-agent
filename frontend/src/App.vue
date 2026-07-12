@@ -1,5 +1,8 @@
 <script setup>
 import { ref, computed, nextTick, onMounted } from 'vue'
+import { marked } from 'marked'
+
+marked.use({ breaks: true })
 
 const API_BASE = '/api'
 
@@ -445,7 +448,7 @@ onMounted(() => {
           <div v-for="(msg, i) in messages" :key="i" class="msg-row" :class="msg.role">
             <div class="avatar">{{ msg.role === 'user' ? '👤' : msg.role === 'ai' ? '🤖' : '⚙️' }}</div>
             <div class="bubble">
-              <div class="msg-text" v-html="msg.text.replace(/\n/g, '<br>')" />
+              <div class="msg-text" v-html="marked.parse(msg.text)" />
               <div v-if="msg.outputFile" class="output-area">
                 <img
                   v-if="isImage(msg.outputFile)"
