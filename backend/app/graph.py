@@ -14,9 +14,13 @@ class state(MessagesState):
     flag: bool = False
     output_file: str = ''
     search_count: int = 0
+    progress: list = None
 
 
 def search(state: state):
+    if state.get('progress') is not None:
+        state['progress'].append('正在查询知识库...')
+
     if state.get('search_count', 0) >= 10:
         logger.info('查询次数已达上限（10 次），跳过后续查询')
         return {
@@ -38,6 +42,9 @@ def search(state: state):
 
 
 def execute(state: state):
+    if state.get('progress') is not None:
+        state['progress'].append('正在执行命令...')
+
     logger.info('执行命令')
     user_question = state['history'][0].content if state.get('history') else ''
     execute_prompt = (
@@ -84,7 +91,7 @@ exec_workflow.add_conditional_edges(
 )
 
 
-def exec_graph(question: str) -> dict:
+def exec_graph(question: str, progress: list = None) -> dict:
     logger.info(f'开始执行，用户问题：{question}')
     compiled = exec_workflow.compile()
     result = compiled.invoke({
@@ -96,6 +103,7 @@ def exec_graph(question: str) -> dict:
         "flag": False,
         "output_file": "",
         "search_count": 0,
+        "progress": progress,
     })
     return result
 
