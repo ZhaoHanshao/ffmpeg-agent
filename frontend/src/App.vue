@@ -198,6 +198,7 @@ async function sendMessage() {
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    let lastStatus = ''
 
     while (true) {
       const { done, value } = await reader.read()
@@ -205,7 +206,6 @@ async function sendMessage() {
 
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
-      // 保留最后一个不完整的行
       buffer = lines.pop() || ''
 
       for (const line of lines) {
@@ -217,9 +217,17 @@ async function sendMessage() {
 
         try {
           const data = JSON.parse(payload)
-          if (data.event === 'token') {
+          if (data.event === 'status') {
+            lastStatus = data.text
+            reply.text = `⏳ ${data.text}`
+            messages.value = [...messages.value]
+            scrollBottom()
+          } else if (data.event === 'token') {
+            if (lastStatus) {
+              reply.text = `${lastStatus}\n\n`
+              lastStatus = ''
+            }
             reply.text += data.text
-            // 触发 Vue 响应式更新
             messages.value = [...messages.value]
             scrollBottom()
           } else if (data.event === 'meta' && data.output_file) {
