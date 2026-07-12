@@ -91,6 +91,14 @@ def execute_command(command: str):
 
     logger.info(f'执行命令：{command}')
     os.makedirs(DOWNLOAD, exist_ok=True)
+
+    # 清空下载目录，防止 ffmpeg 阻塞在 Overwrite? [y/N] 提示
+    if os.path.exists(DOWNLOAD):
+        for f in os.listdir(DOWNLOAD):
+            fp = os.path.join(DOWNLOAD, f)
+            if os.path.isfile(fp):
+                os.remove(fp)
+
     try:
         exit_code = subprocess.run(args=shlex.split(command), capture_output=True)
         if exit_code.returncode == 0:

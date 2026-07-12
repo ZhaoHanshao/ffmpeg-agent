@@ -242,10 +242,4 @@ app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        reload_excludes=["*/__pycache__/*", "*.pyc", "backend/app/data/*"],
-    )
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000)
