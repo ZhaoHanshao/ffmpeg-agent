@@ -1,4 +1,4 @@
-import os, sys, shutil, json, atexit, io, zipfile, datetime, logging
+import os, sys, shutil, json, atexit, io, zipfile, datetime, logging, asyncio
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
@@ -89,22 +89,28 @@ async def upload_files(files: list[UploadFile] = File(...)):
 
 @app.post("/api/chat")
 async def chat(question: str = Form(...)):
-    """发送问题 → 执行 search+execute 循环 → 流式输出 chat 回复"""
+    """发送问题 → 流式输出（search+execute 进度 + chat 逐 token）"""
     logger.info('处理对话')
     logger.info(f'用户问题：{question[:200]}')
 
-    # Step 1: 执行 search+execute 循环（同步）
-    exec_state = exec_graph(question)
-    output_file = exec_state.get('output_file', '') or ''
-
-    # Step 2: 构建 chat prompt
-    chat_prompt = build_chat_prompt(exec_state)
-
-    # Step 3: 流式输出 chat agent 的回复（SSE）
     async def event_stream():
-        # 先发 meta 事件（输出文件信息）
+        yield f"data: {json.dumps({'event': 'status', 'text': '正在分析问题并查询知识库...'})}\n\n"
+
+        try:
+            exec_state = await asyncio.to_thread(exec_graph, question)
+        except Exception as e:
+            logger.error(f'图谱执行失败：{e}')
+            yield f"data: {json.dumps({'event': 'error', 'text': f'知识库查询或命令执行失败：{str(e)}'})}\n\n"
+            yield "data: {\"event\": \"done\"}\n\n"
+            return
+
+        output_file = exec_state.get('output_file', '') or ''
+
         yield f"data: {json.dumps({'event': 'meta', 'output_file': output_file})}\n\n"
 
+        yield f"data: {json.dumps({'event': 'status', 'text': '正在生成回答...'})}\n\n"
+
+        chat_prompt = build_chat_prompt(exec_state)
         full_text = ''
         try:
             async for event in agent_chat.astream_events(
@@ -236,4 +242,10 @@ app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        reload_excludes=["*/__pycache__/*", "*.pyc", "backend/app/data/*"],
+    )
