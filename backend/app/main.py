@@ -94,10 +94,18 @@ async def chat(question: str = Form(...)):
     logger.info(f'用户问题：{question[:200]}')
 
     async def event_stream():
-        yield f"data: {json.dumps({'event': 'status', 'text': '正在分析问题并查询知识库...'})}\n\n"
+        progress = []
+        graph_task = asyncio.create_task(
+            asyncio.to_thread(exec_graph, question, progress)
+        )
+
+        while not graph_task.done():
+            while progress:
+                yield f"data: {json.dumps({'event': 'status', 'text': progress.pop(0)})}\n\n"
+            await asyncio.sleep(0.2)
 
         try:
-            exec_state = await asyncio.to_thread(exec_graph, question)
+            exec_state = await graph_task
         except Exception as e:
             logger.error(f'图谱执行失败：{e}')
             yield f"data: {json.dumps({'event': 'error', 'text': f'知识库查询或命令执行失败：{str(e)}'})}\n\n"
