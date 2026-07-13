@@ -18,7 +18,7 @@ if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
 from app.graph import exec_graph, build_chat_prompt
-from app.agents import agent_chat
+from app.agents import ensure_agents
 from langchain.messages import HumanMessage
 
 load_dotenv()
@@ -90,8 +90,16 @@ async def upload_files(files: list[UploadFile] = File(...)):
 @app.post("/api/chat")
 async def chat(question: str = Form(...)):
     """发送问题 → 流式输出（search+execute 进度 + chat 逐 token）"""
+    if not ensure_agents():
+        return Response(
+            content=f"data: {json.dumps({'event': 'error', 'text': 'LLM 未配置，请先在页面右上角 ⚙️ 设置中填写模型信息'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
+            media_type="text/event-stream",
+        )
+
     logger.info('处理对话')
     logger.info(f'用户问题：{question[:200]}')
+
+    from app.agents import agent_chat
 
     async def event_stream():
         progress = []
@@ -246,6 +254,29 @@ async def delete_uploaded(filename: str):
     return {"deleted": filename}
 
 from fastapi.staticfiles import StaticFiles
+
+
+# ── LLM 设置 ──
+from app.model import get_model_config, update_model_config
+
+_settings_store = dict(get_model_config())
+
+
+@app.get("/api/settings/llm")
+async def get_llm_settings():
+    settings = get_model_config()
+    _settings_store.update(settings)
+    return _settings_store
+
+
+@app.put("/api/settings/llm")
+async def update_llm_settings(body: dict):
+    update_model_config(body)
+    cfg = get_model_config()
+    _settings_store.update(cfg)
+    return _settings_store
+
+
 app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
 
 if __name__ == '__main__':
