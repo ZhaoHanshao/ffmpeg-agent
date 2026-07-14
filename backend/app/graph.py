@@ -1,5 +1,5 @@
 import os, shlex, json, logging
-from app.agents import agent_chat, agent_execute, agent_search
+from app.agents import ensure_agents
 from langgraph.graph import START, END, StateGraph, MessagesState
 from langchain.messages import ToolMessage, AnyMessage, AIMessage, HumanMessage
 
@@ -18,6 +18,11 @@ class state(MessagesState):
 
 
 def search(state: state):
+    if not ensure_agents():
+        raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
+
+    from app.agents import agent_search
+
     if state.get('progress') is not None:
         state['progress'].append('正在查询知识库...')
 
@@ -42,6 +47,11 @@ def search(state: state):
 
 
 def execute(state: state):
+    if not ensure_agents():
+        raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
+
+    from app.agents import agent_execute
+
     if state.get('progress') is not None:
         state['progress'].append('正在执行命令...')
 
@@ -126,9 +136,14 @@ def build_chat_prompt(state: dict) -> str:
 
 if __name__ == '__main__':
     import sys
+    if not ensure_agents():
+        print('错误：LLM 未配置，请先设置 MODEL_NAME、BASE_URL、API_KEY')
+        sys.exit(1)
     q = ' '.join(sys.argv[1:]) or '如何将图片反色？'
     exec_state = exec_graph(q)
     prompt = build_chat_prompt(exec_state)
+
+    from app.agents import agent_chat
     res = agent_chat.invoke({'messages': [HumanMessage(content=prompt)]})
     reply = res['messages'][-1].content if 'messages' in res else str(res)
     logger.info(f"AI: {reply}")
