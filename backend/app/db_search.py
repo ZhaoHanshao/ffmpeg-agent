@@ -89,7 +89,7 @@ def get_text(question: str):
     logger.info('向量检索')
     logger.info(f'检索内容：{question[:200]}')
     try:
-        result = _get_vector_db().similarity_search(query=question, k=5)
+        result = _get_vector_db().similarity_search(query=question, k=20)
         return [doc.page_content for doc in result]
     except Exception as e:
         return f'查询失败，原因:\n{e}'
