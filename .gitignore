@@ -10,3 +10,4 @@ backend/download/*
 backend/upload/*
 /.dockerignore
 docker-deploy-guide.md
+/backend/tests
