@@ -1,7 +1,14 @@
 from app.model import get_model, is_configured
 from langchain.agents import create_agent
+from langchain.agents.middleware import ToolCallLimitMiddleware
 from app.tools import get_command, get_files, execute_command
 from langchain.messages import SystemMessage
+
+_search_tool_limit = ToolCallLimitMiddleware(
+    tool_name="get_command",
+    run_limit=10,
+    thread_limit=10,
+)
 
 _search_prompt = (
     '你是一个 FFmpeg 知识库查询助手。'
@@ -43,7 +50,7 @@ def _build_agents():
     if m is None:
         return None, None, None
     return (
-        create_agent(model=m, system_prompt=SystemMessage(content=_search_prompt), tools=[get_command]),
+        create_agent(model=m, system_prompt=SystemMessage(content=_search_prompt), tools=[get_command], middleware=[_search_tool_limit]),
         create_agent(model=m, system_prompt=SystemMessage(content=_execute_prompt), tools=[get_files, execute_command]),
         create_agent(model=m, system_prompt=SystemMessage(content=_chat_prompt), tools=[]),
     )
