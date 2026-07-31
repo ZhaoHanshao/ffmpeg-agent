@@ -22,14 +22,18 @@ def get_model():
 
 
 def rebuild_agents():
-    from app.agents import _build_agents
+    from app.agents import _build_agents, _build_probe_agents
     import app.agents as agents_mod
     if is_configured():
         agents_mod.agent_search, agents_mod.agent_execute, agents_mod.agent_chat = _build_agents()
+        agents_mod.agent_probe_search, agents_mod.agent_probe_execute, agents_mod.agent_probe_chat = _build_probe_agents()
     else:
         agents_mod.agent_search = None
         agents_mod.agent_execute = None
         agents_mod.agent_chat = None
+        agents_mod.agent_probe_search = None
+        agents_mod.agent_probe_execute = None
+        agents_mod.agent_probe_chat = None
 
 
 def update_model_config(new_config: dict):

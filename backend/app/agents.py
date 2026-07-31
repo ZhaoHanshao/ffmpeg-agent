@@ -1,7 +1,7 @@
 from app.model import get_model, is_configured
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolCallLimitMiddleware
-from app.tools import get_command, get_files, execute_command
+from app.tools import get_command, get_files, execute_command, get_probe_command, execute_probe_command
 from langchain.messages import SystemMessage
 
 _search_tool_limit = ToolCallLimitMiddleware(
@@ -66,3 +66,70 @@ def ensure_agents():
     if agent_search is None:
         agent_search, agent_execute, agent_chat = _build_agents()
     return agent_search is not None
+
+
+# ── ffprobe agents ──
+
+_probe_search_tool_limit = ToolCallLimitMiddleware(
+    tool_name="get_probe_command",
+    run_limit=10,
+    thread_limit=10,
+)
+
+_probe_search_prompt = (
+    '你是一个 FFprobe 知识库查询助手。'
+    '你的任务是根据用户的 FFprobe 相关问题，使用 get_probe_command 工具查询知识库，知识库为英文知识库，用英文进行查询，'
+    '获取相关的 FFprobe 命令和文档片段，然后将查询结果整理后返回。'
+    '只需要返回查询到的 FFprobe 命令和参数解释，不要添加额外说明。'
+)
+
+_probe_execute_prompt = (
+    '你是一个 FFprobe 命令执行专家。你的职责是根据用户问题和知识库内容，'
+    '生成并执行正确的 ffprobe 命令。\n\n'
+    '规则：\n'
+    '1. 只能调用 execute_probe_command 执行以 ffprobe 开头的命令\n'
+    '2. 先用 get_files 查看可用的输入文件\n'
+    '3. 输入文件路径用 get_files 返回的实际路径\n'
+    '4. ffprobe 是只读分析工具，输出打印到终端即可，不要添加输出文件参数\n'
+    '5. 查看媒体信息时使用 -show_format、-show_streams、-show_packets 等参数，常用组合：ffprobe -v error -show_format -show_streams\n'
+    '6. 一个任务只执行一次 ffprobe，不要重复尝试多种参数\n'
+    '7. 如果 ffprobe 成功（返回 flag=true），立即结束，不要继续尝试其他命令\n'
+    '8. 不要执行 ffmpeg、convert、apt-get、sudo、pip、python、ls、pwd、find、which 等非 ffprobe 命令\n'
+    '9. 如果 ffprobe 执行失败，分析 stderr 后最多再重试一次修正后的命令\n'
+    '10. 如果最终结果仍失败，返回失败原因。'
+)
+
+_probe_chat_prompt = (
+    '你是一个 FFprobe 助手。你的任务是根据用户的原始问题、知识库检索结果和执行结果，'
+    '给用户一个完整、简洁的回答。\n\n'
+    '要求：\n'
+    '1. 先直接回答用户的问题——告诉用户是否已成功完成\n'
+    '2. 如果成功，说明使用了什么命令，并把 ffprobe 输出的关键信息'
+    '（格式、编码、分辨率、码率、时长等）整理成易读的说明\n'
+    '3. 如果失败，说明失败原因和建议\n'
+    '4. 适当引用执行日志中的关键信息\n'
+    '5. 使用中文、语气友好'
+)
+
+
+def _build_probe_agents():
+    m = get_model()
+    if m is None:
+        return None, None, None
+    return (
+        create_agent(model=m, system_prompt=SystemMessage(content=_probe_search_prompt), tools=[get_probe_command], middleware=[_probe_search_tool_limit]),
+        create_agent(model=m, system_prompt=SystemMessage(content=_probe_execute_prompt), tools=[get_files, execute_probe_command]),
+        create_agent(model=m, system_prompt=SystemMessage(content=_probe_chat_prompt), tools=[]),
+    )
+
+
+agent_probe_search, agent_probe_execute, agent_probe_chat = None, None, None
+
+
+def ensure_probe_agents():
+    global agent_probe_search, agent_probe_execute, agent_probe_chat
+    if not is_configured():
+        return False
+    if agent_probe_search is None:
+        agent_probe_search, agent_probe_execute, agent_probe_chat = _build_probe_agents()
+    return agent_probe_search is not None

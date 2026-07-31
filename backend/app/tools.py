@@ -1,6 +1,6 @@
 from langchain.tools import tool
 from langchain_core.runnables import RunnableConfig
-from app.db_search import get_text
+from app.db_search import get_text, get_probe_text
 from dotenv import load_dotenv
 import os, subprocess, shlex, logging
 
@@ -22,6 +22,23 @@ def get_command(squry: str):
     logger.info('查询知识库')
     logger.info(f'查询内容：{squry[:200]}')
     result = get_text(squry)
+    contents = []
+    for i, doc in enumerate(result, 1):
+        content = f'来源[{i}]，{doc}'
+        contents.append(content)
+    return contents
+
+
+@tool
+def get_probe_command(squry: str):
+    """
+    根据用户的问题查询ffprobe文档中相关的内容
+    squry:用户的问题
+    返回的结果为列表，包括按相关度排序的序号和具体内容
+    """
+    logger.info('查询 ffprobe 知识库')
+    logger.info(f'查询内容：{squry[:200]}')
+    result = get_probe_text(squry)
     contents = []
     for i, doc in enumerate(result, 1):
         content = f'来源[{i}]，{doc}'
@@ -107,6 +124,47 @@ def execute_command(command: str):
             return {
                 'command': command,
                 'command_result': f'{command} 执行失败：{exit_code.stderr.decode(errors="replace")}',
+            }
+    except OSError as e:
+        return {
+            'command': command,
+            'command_result': f'命令执行异常：{e}',
+        }
+
+
+@tool
+def execute_probe_command(command: str):
+    """
+    执行ffprobe命令（只读分析工具，结果输出到标准输出）
+    参数值：
+    command:标准的终端ffprobe执行命令，例如:ffprobe -v error -show_format input.mp4
+    返回中文常规执行结果
+    """
+    logger.info('执行 ffprobe 命令')
+    logger.info(f'原始命令：{command}')
+
+    # 安全校验：只允许以 ffprobe 开头的命令
+    cmd_name = shlex.split(command)[0]
+    if cmd_name != 'ffprobe':
+        logger.info(f'拒绝执行非 ffprobe 命令：{cmd_name}')
+        return {
+            'command': command,
+            'command_result': f'拒绝执行非 ffprobe 命令：{cmd_name}。请直接使用 ffprobe 命令完成任务。',
+        }
+
+    try:
+        proc = subprocess.run(args=shlex.split(command), capture_output=True)
+        if proc.returncode == 0:
+            output = proc.stdout.decode(errors='replace').strip()
+            return {
+                'command': command,
+                'flag': True,
+                'command_result': output or f'{command} 执行成功',
+            }
+        else:
+            return {
+                'command': command,
+                'command_result': f'{command} 执行失败：{proc.stderr.decode(errors="replace")}',
             }
     except OSError as e:
         return {
