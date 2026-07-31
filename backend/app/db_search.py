@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 DB_DIR = os.getenv('DB_DIR')
 COLLECTION_NAME = os.getenv('COLLECTION_NAME')
+PROBE_COLLECTION_NAME = os.getenv('PROBE_COLLECTION_NAME', 'ffprobe_docs')
 BGE_CACHE_DIR = os.getenv('BGE_CACHE_DIR', 'backend/data/bge_small')
 BGE_MODEL_NAME = os.getenv('BGE_MODEL_NAME', 'BAAI/bge-small-zh-v1.5')
 HF_ENDPOINT = os.getenv('HF_ENDPOINT', '')
@@ -90,6 +91,60 @@ def get_text(question: str):
     logger.info(f'检索内容：{question[:200]}')
     try:
         result = _get_vector_db().similarity_search(query=question, k=20)
+        return [doc.page_content for doc in result]
+    except Exception as e:
+        return f'查询失败，原因:\n{e}'
+
+
+# ── ffprobe 知识库（ffprobe-all.html） ──
+
+@lru_cache(maxsize=1)
+def _get_probe_vector_db():
+    logger.info('加载 ffprobe 向量数据库')
+    return Chroma(
+        persist_directory=DB_DIR,
+        embedding_function=get_embeddings(),
+        collection_name=PROBE_COLLECTION_NAME,
+    )
+
+
+def _ensure_probe_vector_db():
+    db_file = os.path.join(DB_DIR, 'chroma.sqlite3') if DB_DIR else ''
+    if DB_DIR and os.path.isfile(db_file):
+        try:
+            collections = [c.name for c in _get_vector_db()._client.list_collections()]
+            if PROBE_COLLECTION_NAME in collections:
+                logger.info('ffprobe 向量库已存在，跳过构建')
+                return
+        except Exception as e:
+            logger.warning(f'检查 ffprobe 向量库失败：{e}，跳过构建避免重复')
+            return
+
+    logger.info('首次构建 ffprobe 向量库')
+
+    PROBE_DOC_URL = os.getenv('PROBE_DOC_URL', 'https://ffmpeg.org/ffprobe-all.html')
+
+    from app.build_vector_db import fetch_and_chunk
+    chunks = fetch_and_chunk(PROBE_DOC_URL)
+    if not chunks:
+        logger.warning('警告: 未获取到 ffprobe 文档内容，向量库构建失败')
+        return
+
+    embeddings = get_embeddings()
+    Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory=DB_DIR,
+        collection_name=PROBE_COLLECTION_NAME,
+    )
+    logger.info('ffprobe 向量库构建完成')
+
+
+def get_probe_text(question: str):
+    logger.info('ffprobe 向量检索')
+    logger.info(f'检索内容：{question[:200]}')
+    try:
+        result = _get_probe_vector_db().similarity_search(query=question, k=20)
         return [doc.page_content for doc in result]
     except Exception as e:
         return f'查询失败，原因:\n{e}'

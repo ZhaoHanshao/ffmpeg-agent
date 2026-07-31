@@ -6,6 +6,9 @@ marked.use({ breaks: true })
 
 const API_BASE = '/api'
 
+// ── 模式：ffmpeg 处理 / ffprobe 分析 ──
+const mode = ref('ffmpeg')
+
 // ── 状态 ──
 const uploadedFiles = ref([])
 const outputFiles = ref([])
@@ -207,7 +210,8 @@ async function sendMessage() {
   try {
     const form = new FormData()
     form.append('question', text)
-    const res = await fetch(`${API_BASE}/chat`, { method: 'POST', body: form })
+    const endpoint = mode.value === 'ffprobe' ? `${API_BASE}/probe/chat` : `${API_BASE}/chat`
+    const res = await fetch(endpoint, { method: 'POST', body: form })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
     const reader = res.body.getReader()
@@ -342,8 +346,20 @@ onMounted(() => {
     <header class="header">
       <div class="header-inner">
         <span class="logo">🎬 FFmpeg Agent</span>
-        <span class="subtitle">自然语言 → FFmpeg 命令</span>
+        <span class="subtitle">{{ mode === 'ffprobe' ? '自然语言 → FFprobe 分析' : '自然语言 → FFmpeg 命令' }}</span>
         <div class="header-spacer" />
+        <div class="mode-switch">
+          <button
+            class="mode-btn"
+            :class="{ active: mode === 'ffmpeg' }"
+            @click="mode = 'ffmpeg'"
+          >FFmpeg 处理</button>
+          <button
+            class="mode-btn"
+            :class="{ active: mode === 'ffprobe' }"
+            @click="mode = 'ffprobe'"
+          >FFprobe 分析</button>
+        </div>
         <button class="settings-btn" title="LLM 设置" @click="showSettings = true">⚙️</button>
       </div>
     </header>
@@ -533,9 +549,14 @@ onMounted(() => {
         <div class="chat-messages">
           <div v-if="!messages.length" class="empty-chat">
             <div class="empty-icon">💬</div>
-            <p>上传文件后，告诉我你想对文件做什么</p>
+            <p>{{ mode === 'ffprobe' ? '上传文件后，告诉我你想查看文件的哪些信息' : '上传文件后，告诉我你想对文件做什么' }}</p>
             <p class="examples">
-              例如：<em>把图片反色</em> · <em>转成 mp4</em> · <em>裁剪中间 10 秒</em>
+              <template v-if="mode === 'ffprobe'">
+                例如：<em>查看视频的分辨率和编码</em> · <em>查看音频采样率</em> · <em>导出帧的元数据</em>
+              </template>
+              <template v-else>
+                例如：<em>把图片反色</em> · <em>转成 mp4</em> · <em>裁剪中间 10 秒</em>
+              </template>
             </p>
           </div>
 
@@ -572,7 +593,7 @@ onMounted(() => {
           <textarea
             ref="textareaRef"
             v-model="question"
-            placeholder="输入你对文件的处理需求…"
+            :placeholder="mode === 'ffprobe' ? '输入你想查看的文件信息…' : '输入你对文件的处理需求…'"
             rows="1"
             :disabled="sending"
             @keydown="onKeydown"
@@ -1005,6 +1026,31 @@ a:hover { text-decoration: underline; }
 
 /* ── Header Spacer & Settings Button ── */
 .header-spacer { flex: 1; }
+.mode-switch {
+  display: flex;
+  background: #f3f4f6;
+  border-radius: 8px;
+  padding: 3px;
+  gap: 2px;
+}
+.mode-btn {
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #6b7280;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.mode-btn:hover { color: #374151; }
+.mode-btn.active {
+  background: #fff;
+  color: #4f6ef7;
+  box-shadow: 0 1px 3px rgba(0,0,0,.1);
+}
 .settings-btn {
   background: none; border: 1px solid #e5e7eb; border-radius: 8px;
   cursor: pointer; font-size: 18px; padding: 4px 10px; line-height: 1;

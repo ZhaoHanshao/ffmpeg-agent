@@ -17,8 +17,8 @@ os.chdir(os.path.dirname(_backend_dir))
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
-from app.graph import exec_graph, build_chat_prompt
-from app.agents import ensure_agents
+from app.graph import exec_graph, build_chat_prompt, probe_exec_graph, build_probe_chat_prompt
+from app.agents import ensure_agents, ensure_probe_agents
 from langchain.messages import HumanMessage
 
 load_dotenv()
@@ -50,9 +50,11 @@ app.add_middleware(
 @app.on_event("startup")
 def preload_models():
     logger.info('预加载模型和向量库')
-    from app.db_search import _ensure_vector_db, _get_vector_db
+    from app.db_search import _ensure_vector_db, _get_vector_db, _ensure_probe_vector_db, _get_probe_vector_db
     _ensure_vector_db()
     _get_vector_db()
+    _ensure_probe_vector_db()
+    _get_probe_vector_db()
     logger.info('预加载完成')
 
 
@@ -87,9 +89,60 @@ async def upload_files(files: list[UploadFile] = File(...)):
     return {"uploaded": saved}
 
 
+async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder):
+    """公共 SSE 流：graph 进度 → meta → chat 逐 token → done"""
+    progress = []
+    graph_task = asyncio.create_task(
+        asyncio.to_thread(graph_fn, question, progress)
+    )
+
+    while not graph_task.done():
+        while progress:
+            yield f"data: {json.dumps({'event': 'status', 'text': progress.pop(0)})}\n\n"
+        await asyncio.sleep(0.2)
+
+    try:
+        exec_state = await graph_task
+    except Exception as e:
+        logger.error(f'图谱执行失败：{e}')
+        yield f"data: {json.dumps({'event': 'error', 'text': f'知识库查询或命令执行失败：{str(e)}'})}\n\n"
+        yield "data: {\"event\": \"done\"}\n\n"
+        return
+
+    output_file = exec_state.get('output_file', '') or ''
+
+    yield f"data: {json.dumps({'event': 'meta', 'output_file': output_file})}\n\n"
+
+    yield f"data: {json.dumps({'event': 'status', 'text': '正在生成回答...'})}\n\n"
+
+    chat_prompt = prompt_builder(exec_state)
+    full_text = ''
+    try:
+        async for event in chat_agent.astream_events(
+            {"messages": [HumanMessage(content=chat_prompt)]},
+            version="v2",
+        ):
+            if event["event"] == "on_chat_model_stream":
+                chunk = event["data"]["chunk"]
+                content = getattr(chunk, 'content', '')
+                if content:
+                    full_text += content
+                    yield f"data: {json.dumps({'event': 'token', 'text': content})}\n\n"
+    except Exception as e:
+        yield f"data: {json.dumps({'event': 'error', 'text': str(e)})}\n\n"
+        return
+
+    yield "data: {\"event\": \"done\"}\n\n"
+
+    if full_text:
+        logger.info(f'AI回复：{full_text[:200]}')
+    if output_file:
+        logger.info(f'输出文件：{output_file}')
+
+
 @app.post("/api/chat")
 async def chat(question: str = Form(...)):
-    """发送问题 → 流式输出（search+execute 进度 + chat 逐 token）"""
+    """发送问题 → 流式输出（ffmpeg search+execute 进度 + chat 逐 token）"""
     if not ensure_agents():
         return Response(
             content=f"data: {json.dumps({'event': 'error', 'text': 'LLM 未配置，请先在页面右上角 ⚙️ 设置中填写模型信息'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
@@ -101,56 +154,30 @@ async def chat(question: str = Form(...)):
 
     from app.agents import agent_chat
 
-    async def event_stream():
-        progress = []
-        graph_task = asyncio.create_task(
-            asyncio.to_thread(exec_graph, question, progress)
+    return StreamingResponse(
+        _event_stream(question, exec_graph, agent_chat, build_chat_prompt),
+        media_type="text/event-stream",
+    )
+
+
+@app.post("/api/probe/chat")
+async def probe_chat(question: str = Form(...)):
+    """发送问题 → 流式输出（ffprobe search+execute 进度 + chat 逐 token）"""
+    if not ensure_probe_agents():
+        return Response(
+            content=f"data: {json.dumps({'event': 'error', 'text': 'LLM 未配置，请先在页面右上角 ⚙️ 设置中填写模型信息'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
+            media_type="text/event-stream",
         )
 
-        while not graph_task.done():
-            while progress:
-                yield f"data: {json.dumps({'event': 'status', 'text': progress.pop(0)})}\n\n"
-            await asyncio.sleep(0.2)
+    logger.info('处理 ffprobe 对话')
+    logger.info(f'用户问题：{question[:200]}')
 
-        try:
-            exec_state = await graph_task
-        except Exception as e:
-            logger.error(f'图谱执行失败：{e}')
-            yield f"data: {json.dumps({'event': 'error', 'text': f'知识库查询或命令执行失败：{str(e)}'})}\n\n"
-            yield "data: {\"event\": \"done\"}\n\n"
-            return
+    from app.agents import agent_probe_chat
 
-        output_file = exec_state.get('output_file', '') or ''
-
-        yield f"data: {json.dumps({'event': 'meta', 'output_file': output_file})}\n\n"
-
-        yield f"data: {json.dumps({'event': 'status', 'text': '正在生成回答...'})}\n\n"
-
-        chat_prompt = build_chat_prompt(exec_state)
-        full_text = ''
-        try:
-            async for event in agent_chat.astream_events(
-                {"messages": [HumanMessage(content=chat_prompt)]},
-                version="v2",
-            ):
-                if event["event"] == "on_chat_model_stream":
-                    chunk = event["data"]["chunk"]
-                    content = getattr(chunk, 'content', '')
-                    if content:
-                        full_text += content
-                        yield f"data: {json.dumps({'event': 'token', 'text': content})}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'event': 'error', 'text': str(e)})}\n\n"
-            return
-
-        yield "data: {\"event\": \"done\"}\n\n"
-
-        if full_text:
-            logger.info(f'AI回复：{full_text[:200]}')
-        if output_file:
-            logger.info(f'输出文件：{output_file}')
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        _event_stream(question, probe_exec_graph, agent_probe_chat, build_probe_chat_prompt),
+        media_type="text/event-stream",
+    )
 
 
 @app.get("/api/output")
