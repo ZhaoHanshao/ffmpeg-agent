@@ -11,3 +11,5 @@ backend/upload/*
 /.dockerignore
 docker-deploy-guide.md
 /backend/tests
+api-contract.md
+api-contract.pdf
