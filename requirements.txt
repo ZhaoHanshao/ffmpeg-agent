@@ -6,6 +6,9 @@ langchain_chroma
 langchain_text_splitters
 chromadb
 sentence-transformers
+# transformers 5.x 在 import 时调用 importlib.metadata.packages_distributions()，
+# 大量已装包环境下耗时数秒~数十秒，导致后端启动长时间无输出；4.x 仅用 find_spec，无此问题
+transformers>=4.41,<5
 fastapi
 uvicorn
 python-multipart
