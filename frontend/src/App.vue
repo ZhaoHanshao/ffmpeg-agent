@@ -1,275 +1,48 @@
 <script setup>
-import { ref, computed, nextTick, onMounted } from 'vue'
-import { marked } from 'marked'
-
-marked.use({ breaks: true })
-
-const API_BASE = '/api'
+import { ref, onMounted } from 'vue'
+import { useChat } from './composables/useChat'
+import { useSettings } from './composables/useSettings'
+import MessageItem from './components/MessageItem.vue'
+import FilePanel from './components/FilePanel.vue'
+import SettingsModal from './components/SettingsModal.vue'
 
 // ── 模式：ffmpeg 处理 / ffprobe 分析 ──
 const mode = ref('ffmpeg')
+const leftCollapsed = ref(false)
 
-// ── 状态 ──
-const uploadedFiles = ref([])
-const outputFiles = ref([])
-const messages = ref([])
-const question = ref('')
-const uploading = ref(false)
-const sending = ref(false)
-const dragOver = ref(false)
-const loadingUpload = ref(false)
-const loadingOutput = ref(false)
-const selectedOutput = ref(new Set())
-const batchProcessing = ref(false)
+const {
+  messages,
+  question,
+  sending,
+  canSend,
+  chatContainer,
+  sendMessage,
+  stopChat,
+  clearMessages,
+  onChatScroll,
+} = useChat(mode)
 
-// ── 设置 ──
-const showSettings = ref(false)
-const savingSettings = ref(false)
-const configured = ref(null) // null=unknown, true/false
-const settings = ref({
-  model: '',
-  base_url: '',
-  api_key: '',
-  temperature: 0.2,
-  max_tokens: 2048,
-})
+const {
+  showSettings,
+  savingSettings,
+  configured,
+  settings,
+  loadSettings,
+  saveSettings,
+} = useSettings()
 
-const messagesEnd = ref(null)
-const fileInput = ref(null)
 const textareaRef = ref(null)
+const filePanel = ref(null)
 
-const allOutputSelected = computed(() =>
-  outputFiles.value.length > 0 && selectedOutput.value.size === outputFiles.value.length
-)
-
-function toggleOutputFile(file) {
-  const s = new Set(selectedOutput.value)
-  s.has(file) ? s.delete(file) : s.add(file)
-  selectedOutput.value = s
-}
-
-function toggleSelectAllOutput() {
-  if (selectedOutput.value.size === outputFiles.value.length) {
-    selectedOutput.value = new Set()
-  } else {
-    selectedOutput.value = new Set(outputFiles.value)
-  }
-}
-
-async function deleteOutputFile(filename) {
-  try {
-    const res = await fetch(`${API_BASE}/output/${encodeURIComponent(filename)}`, { method: 'DELETE' })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const s = new Set(selectedOutput.value)
-    s.delete(filename)
-    selectedOutput.value = s
-    await refreshOutputFiles()
-  } catch (e) {
-    messages.value.push({ role: 'system', text: `删除失败: ${e.message}` })
-  }
-}
-
-async function deleteSelectedOutput() {
-  const files = [...selectedOutput.value]
-  if (!files.length) return
-  batchProcessing.value = true
-  try {
-    const res = await fetch(`${API_BASE}/output/delete`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files }),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    selectedOutput.value = new Set()
-    await refreshOutputFiles()
-  } catch (e) {
-    messages.value.push({ role: 'system', text: `批量删除失败: ${e.message}` })
-  } finally {
-    batchProcessing.value = false
-  }
-}
-
-async function downloadSelectedOutput() {
-  const files = [...selectedOutput.value]
-  if (!files.length) return
-  batchProcessing.value = true
-  try {
-    const res = await fetch(`${API_BASE}/output/download`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files }),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const blob = await res.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'outputs.zip'
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-  } catch (e) {
-    messages.value.push({ role: 'system', text: `批量下载失败: ${e.message}` })
-  } finally {
-    batchProcessing.value = false
-  }
+function pushSystem(text) {
+  messages.value.push({ role: 'system', text })
 }
 
 function autoResize() {
   const el = textareaRef.value
   if (!el) return
   el.style.height = 'auto'
-  el.style.height = el.scrollHeight + 'px'
-}
-
-// ── 文件列表刷新 ──
-async function refreshUploadedFiles() {
-  loadingUpload.value = true
-  try {
-    const res = await fetch(`${API_BASE}/upload`)
-    const data = await res.json()
-    uploadedFiles.value = data.files || []
-  } catch (e) {
-    console.error('获取上传文件列表失败:', e)
-  } finally {
-    loadingUpload.value = false
-  }
-}
-
-async function refreshOutputFiles() {
-  loadingOutput.value = true
-  try {
-    const res = await fetch(`${API_BASE}/output`)
-    const data = await res.json()
-    outputFiles.value = data.files || []
-  } catch (e) {
-    console.error('获取已完成文件列表失败:', e)
-  } finally {
-    loadingOutput.value = false
-  }
-}
-
-// ── 文件上传 ──
-function triggerUpload() {
-  fileInput.value?.click()
-}
-
-function onFileChange(e) {
-  const files = e.target.files
-  if (files?.length) doUpload(files)
-  e.target.value = ''
-}
-
-function onDrop(e) {
-  dragOver.value = false
-  const files = e.dataTransfer?.files
-  if (files?.length) doUpload(files)
-}
-
-async function doUpload(files) {
-  uploading.value = true
-  try {
-    const form = new FormData()
-    for (const f of files) form.append('files', f)
-    const res = await fetch(`${API_BASE}/upload`, { method: 'POST', body: form })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    await refreshUploadedFiles()
-  } catch (e) {
-    messages.value.push({ role: 'system', text: `上传失败: ${e.message}` })
-  } finally {
-    uploading.value = false
-  }
-}
-
-// ── 文件删除 ──
-async function deleteUploadedFile(filename) {
-  try {
-    const res = await fetch(`${API_BASE}/upload/${encodeURIComponent(filename)}`, { method: 'DELETE' })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    await refreshUploadedFiles()
-  } catch (e) {
-    messages.value.push({ role: 'system', text: `删除失败: ${e.message}` })
-  }
-}
-
-// ── 对话（SSE 流式输出） ──
-async function sendMessage() {
-  const text = question.value.trim()
-  if (!text || sending.value) return
-
-  messages.value.push({ role: 'user', text })
-  question.value = ''
-  sending.value = true
-  scrollBottom()
-
-  // 创建占位 AI 消息，逐步填入 token
-  const reply = { role: 'ai', text: '' }
-  messages.value.push(reply)
-
-  try {
-    const form = new FormData()
-    form.append('question', text)
-    const endpoint = mode.value === 'ffprobe' ? `${API_BASE}/probe/chat` : `${API_BASE}/chat`
-    const res = await fetch(endpoint, { method: 'POST', body: form })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let lastStatus = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed.startsWith('data: ')) continue
-
-        const payload = trimmed.slice(6)
-        if (payload === '{"event":"done"}') continue
-
-        try {
-          const data = JSON.parse(payload)
-          if (data.event === 'status') {
-            lastStatus = data.text
-            reply.text = `⏳ ${data.text}`
-            messages.value = [...messages.value]
-            scrollBottom()
-          } else if (data.event === 'token') {
-            if (lastStatus) {
-              reply.text = `${lastStatus}\n\n`
-              lastStatus = ''
-            }
-            reply.text += data.text
-            messages.value = [...messages.value]
-            scrollBottom()
-          } else if (data.event === 'meta' && data.output_file) {
-            reply.outputFile = data.output_file
-          } else if (data.event === 'error') {
-            reply.text += `\n[错误] ${data.text}`
-          }
-        } catch {
-          // 跳过不完整的 JSON
-        }
-      }
-    }
-  } catch (e) {
-    reply.text = `请求失败: ${e.message}`
-  } finally {
-    sending.value = false
-    scrollBottom()
-    // 对话完成后 upload/ 已被后端清空，刷新两侧列表
-    await refreshUploadedFiles()
-    if (reply.outputFile) {
-      await refreshOutputFiles()
-    }
-  }
+  el.style.height = `${el.scrollHeight}px`
 }
 
 function onKeydown(e) {
@@ -279,63 +52,19 @@ function onKeydown(e) {
   }
 }
 
-function scrollBottom() {
-  nextTick(() => {
-    messagesEnd.value?.scrollIntoView({ behavior: 'smooth' })
-  })
+function useExample(text) {
+  question.value = text
+  autoResize()
+  sendMessage()
 }
 
-function isImage(name) {
-  return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name)
-}
-function isVideo(name) {
-  return /\.(mp4|webm|avi|mov|mkv)$/i.test(name)
+async function onSend() {
+  const outputFile = await sendMessage()
+  if (outputFile) await filePanel.value?.refreshAll()
 }
 
-// ── 设置 ──
-async function loadSettings() {
-  try {
-    const res = await fetch(`${API_BASE}/settings/llm`)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json()
-    settings.value = { ...settings.value, ...data }
-    configured.value = data.configured === true
-    if (!configured.value) {
-      showSettings.value = true
-    }
-  } catch (e) {
-    console.error('加载设置失败:', e)
-    configured.value = false
-  }
-}
-
-async function saveSettings() {
-  savingSettings.value = true
-  try {
-    const body = { ...settings.value }
-    const res = await fetch(`${API_BASE}/settings/llm`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json()
-    settings.value = { ...settings.value, ...data }
-    configured.value = data.configured === true
-    if (configured.value) {
-      showSettings.value = false
-    }
-  } catch (e) {
-    console.error('保存设置失败:', e)
-  } finally {
-    savingSettings.value = false
-  }
-}
-
-// ── 初始化 ──
 onMounted(() => {
-  refreshUploadedFiles()
-  refreshOutputFiles()
+  if (window.matchMedia?.('(max-width: 768px)').matches) leftCollapsed.value = true
   loadSettings()
 })
 </script>
@@ -349,243 +78,49 @@ onMounted(() => {
         <span class="subtitle">{{ mode === 'ffprobe' ? '自然语言 → FFprobe 分析' : '自然语言 → FFmpeg 命令' }}</span>
         <div class="header-spacer" />
         <div class="mode-switch">
-          <button
-            class="mode-btn"
-            :class="{ active: mode === 'ffmpeg' }"
-            @click="mode = 'ffmpeg'"
-          >FFmpeg 处理</button>
-          <button
-            class="mode-btn"
-            :class="{ active: mode === 'ffprobe' }"
-            @click="mode = 'ffprobe'"
-          >FFprobe 分析</button>
+          <button class="mode-btn" :class="{ active: mode === 'ffmpeg' }" @click="mode = 'ffmpeg'">FFmpeg 处理</button>
+          <button class="mode-btn" :class="{ active: mode === 'ffprobe' }" @click="mode = 'ffprobe'">FFprobe 分析</button>
         </div>
-        <button class="settings-btn" title="LLM 设置" @click="showSettings = true">⚙️</button>
+        <button
+          class="icon-btn"
+          :class="{ active: !leftCollapsed }"
+          title="切换文件列表"
+          @click="leftCollapsed = !leftCollapsed"
+        >📁</button>
+        <button class="icon-btn" title="清空对话" @click="clearMessages">🗑️</button>
+        <button class="icon-btn" title="LLM 设置" @click="showSettings = true">⚙️</button>
       </div>
     </header>
 
     <!-- ── 设置弹窗 ── -->
-    <div v-if="showSettings" class="modal-overlay" :class="{ mandatory: !configured }" @click.self="configured && (showSettings = false)">
-      <div class="modal">
-        <div class="modal-header">
-          <span>LLM 设置</span>
-          <button v-if="configured" class="modal-close" @click="showSettings = false">&times;</button>
-        </div>
-        <div class="modal-body">
-          <p v-if="!configured" class="settings-hint">请先填写 LLM 模型信息以开始使用</p>
-          <label class="settings-field">
-            <span>模型名称 (MODEL_NAME)</span>
-            <input v-model="settings.model" placeholder="如 gpt-4o-mini" />
-          </label>
-          <label class="settings-field">
-            <span>接口地址 (BASE_URL)</span>
-            <input v-model="settings.base_url" placeholder="如 https://api.openai.com/v1" />
-          </label>
-          <label class="settings-field">
-            <span>API Key (API_KEY)</span>
-            <input v-model="settings.api_key" type="password" placeholder="sk-..." />
-          </label>
-          <label class="settings-field">
-            <span>Temperature (温度)</span>
-            <input v-model.number="settings.temperature" type="number" step="0.1" min="0" max="2" />
-          </label>
-          <label class="settings-field">
-            <span>Max Tokens (最大 token 数)</span>
-            <input v-model.number="settings.max_tokens" type="number" step="1" min="1" />
-          </label>
-        </div>
-        <div class="modal-footer">
-          <button v-if="configured" class="btn-cancel" @click="showSettings = false">取消</button>
-          <button class="btn-save" :disabled="savingSettings" @click="saveSettings">
-            {{ savingSettings ? '保存中…' : '保存' }}
-          </button>
-        </div>
-      </div>
-    </div>
+    <SettingsModal
+      v-model:show="showSettings"
+      v-model="settings"
+      :configured="configured"
+      :saving="savingSettings"
+      @save="saveSettings"
+    />
 
     <!-- ── 双栏主体 ── -->
     <div class="body">
-      <!-- ===== 左栏：文件管理 ===== -->
-      <aside class="left-panel">
-        <!-- 上传区域 -->
-        <section class="upload-section">
-          <div
-            class="drop-zone"
-            :class="{ 'drag-over': dragOver, 'has-files': uploadedFiles.length }"
-            @dragover.prevent="dragOver = true"
-            @dragleave="dragOver = false"
-            @drop.prevent="onDrop"
-            @click="triggerUpload"
-          >
-            <input
-              ref="fileInput"
-              type="file"
-              multiple
-              hidden
-              @change="onFileChange"
-            />
-            <template v-if="!uploadedFiles.length">
-              <span class="drop-icon">📁</span>
-              <span class="drop-text">拖拽或点击上传文件</span>
-            </template>
-            <template v-else>
-              <span class="drop-icon">✅</span>
-              <span class="drop-text">{{ uploadedFiles.length }} 个文件已就绪</span>
-            </template>
-            <div v-if="uploading" class="uploading-overlay">
-              <div class="spinner" />
-              <span>上传中…</span>
-            </div>
-          </div>
-        </section>
-
-        <!-- 已上传文件 -->
-        <section class="file-section">
-          <div class="section-title">
-            已上传文件
-            <span v-if="uploadedFiles.length" class="section-count">{{ uploadedFiles.length }}</span>
-          </div>
-          <div class="file-section-body">
-            <div v-if="loadingUpload" class="file-status">
-              <span class="mini-spinner" /> 加载中…
-            </div>
-            <div v-else-if="!uploadedFiles.length" class="file-status empty">
-              <span>暂无上传文件</span>
-            </div>
-            <div v-else class="file-list">
-              <div v-for="f in uploadedFiles" :key="f" class="file-row">
-                <span class="file-icon">📄</span>
-                <span class="file-name" :title="f">{{ f }}</span>
-                <div class="file-actions">
-                  <a
-                    :href="`${API_BASE}/upload/${encodeURIComponent(f)}`"
-                    class="file-btn download"
-                    title="下载"
-                    download
-                  >⬇</a>
-                  <button
-                    class="file-btn delete"
-                    title="删除"
-                    @click="deleteUploadedFile(f)"
-                  >🗑</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- 已完成文件 -->
-        <section class="file-section">
-          <div class="section-title">
-            <label class="select-all" v-if="outputFiles.length" @click.stop>
-              <input
-                type="checkbox"
-                :checked="allOutputSelected"
-                @change="toggleSelectAllOutput"
-              />
-            </label>
-            已完成文件
-            <span v-if="outputFiles.length" class="section-count">{{ outputFiles.length }}</span>
-          </div>
-          <div class="file-section-body">
-            <div v-if="loadingOutput" class="file-status">
-              <span class="mini-spinner" /> 加载中…
-            </div>
-            <div v-else-if="!outputFiles.length" class="file-status empty">
-              <span>暂无完成文件</span>
-            </div>
-            <div v-else class="file-list">
-              <div
-                v-for="f in outputFiles"
-                :key="f"
-                class="file-row"
-                :class="{ selected: selectedOutput.has(f) }"
-                @click="toggleOutputFile(f)"
-              >
-                <span
-                  class="file-checkbox"
-                  :class="{ checked: selectedOutput.has(f) }"
-                  @click.stop="toggleOutputFile(f)"
-                />
-                <span class="file-icon">🎯</span>
-                <span class="file-name" :title="f">{{ f }}</span>
-                <div class="file-actions">
-                  <a
-                    :href="`${API_BASE}/output/${encodeURIComponent(f)}`"
-                    class="file-btn download"
-                    title="下载"
-                    download
-                    @click.stop
-                  >⬇</a>
-                  <button
-                    class="file-btn delete"
-                    title="删除"
-                    @click.stop="deleteOutputFile(f)"
-                  >🗑</button>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div v-if="selectedOutput.size > 0" class="batch-bar">
-            <span class="batch-count">已选 {{ selectedOutput.size }} 项</span>
-            <div class="batch-actions">
-              <button
-                class="batch-btn download"
-                :disabled="batchProcessing"
-                @click="downloadSelectedOutput"
-              >⬇ 下载选中</button>
-              <button
-                class="batch-btn delete"
-                :disabled="batchProcessing"
-                @click="deleteSelectedOutput"
-              >🗑 删除选中</button>
-            </div>
-          </div>
-        </section>
-      </aside>
+      <FilePanel ref="filePanel" :class="{ collapsed: leftCollapsed }" @notify="pushSystem" />
 
       <!-- ===== 右栏：对话界面 ===== -->
       <main class="right-panel">
-        <div class="chat-messages">
+        <div ref="chatContainer" class="chat-messages" @scroll="onChatScroll">
           <div v-if="!messages.length" class="empty-chat">
             <div class="empty-icon">💬</div>
             <p>{{ mode === 'ffprobe' ? '上传文件后，告诉我你想查看文件的哪些信息' : '上传文件后，告诉我你想对文件做什么' }}</p>
             <p class="examples">
-              <template v-if="mode === 'ffprobe'">
-                例如：<em>查看视频的分辨率和编码</em> · <em>查看音频采样率</em> · <em>导出帧的元数据</em>
-              </template>
-              <template v-else>
-                例如：<em>把图片反色</em> · <em>转成 mp4</em> · <em>裁剪中间 10 秒</em>
-              </template>
+              <button v-if="mode === 'ffprobe'" class="example-chip" @click="useExample('查看视频的分辨率和编码')">查看视频的分辨率和编码</button>
+              <button v-if="mode === 'ffprobe'" class="example-chip" @click="useExample('查看音频采样率')">查看音频采样率</button>
+              <button v-if="mode !== 'ffprobe'" class="example-chip" @click="useExample('把图片反色')">把图片反色</button>
+              <button v-if="mode !== 'ffprobe'" class="example-chip" @click="useExample('转成 mp4')">转成 mp4</button>
+              <button v-if="mode !== 'ffprobe'" class="example-chip" @click="useExample('裁剪中间 10 秒')">裁剪中间 10 秒</button>
             </p>
           </div>
 
-          <div v-for="(msg, i) in messages" :key="i" class="msg-row" :class="msg.role">
-            <div class="avatar">{{ msg.role === 'user' ? '👤' : msg.role === 'ai' ? '🤖' : '⚙️' }}</div>
-            <div class="bubble">
-              <div class="msg-text" v-html="marked.parse(msg.text)" />
-              <div v-if="msg.outputFile" class="output-area">
-                <img
-                  v-if="isImage(msg.outputFile)"
-                  :src="`${API_BASE}/output/${encodeURIComponent(msg.outputFile)}`"
-                  class="preview-img"
-                />
-                <video
-                  v-else-if="isVideo(msg.outputFile)"
-                  :src="`${API_BASE}/output/${encodeURIComponent(msg.outputFile)}`"
-                  class="preview-video"
-                  controls
-                />
-                <a
-                  :href="`${API_BASE}/output/${encodeURIComponent(msg.outputFile)}`"
-                  class="download-link"
-                  download
-                >⬇️ 下载 {{ msg.outputFile }}</a>
-              </div>
-            </div>
-          </div>
-
-          <div ref="messagesEnd" />
+          <MessageItem v-for="(msg, i) in messages" :key="i" :msg="msg" />
         </div>
 
         <!-- ── 输入栏 ── -->
@@ -599,10 +134,8 @@ onMounted(() => {
             @keydown="onKeydown"
             @input="autoResize"
           />
-          <button class="send-btn" :disabled="!question.trim() || sending" @click="sendMessage">
-            <span v-if="!sending">发送</span>
-            <span v-else class="spinner-sm" />
-          </button>
+          <button v-if="!sending" class="send-btn" :disabled="!canSend" @click="onSend">发送</button>
+          <button v-else class="send-btn stop" @click="stopChat">⏹ 停止</button>
         </footer>
       </main>
     </div>
@@ -638,394 +171,14 @@ a:hover { text-decoration: underline; }
 }
 .header-inner {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 12px;
 }
-.logo { font-size: 20px; font-weight: 700; color: #1a1a2e; }
-.subtitle { font-size: 13px; color: #9ca3af; }
-
-/* ── Body (two-column) ── */
-.body {
-  flex: 1;
-  display: flex;
-  overflow: hidden;
-}
-
-/* ===== Left Panel ===== */
-.left-panel {
-  width: 360px;
-  flex-shrink: 0;
-  overflow: hidden;
-  background: #fff;
-  border-right: 1px solid #e5e7eb;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-/* ── Upload Zone ── */
-.upload-section { flex-shrink: 0; }
-.drop-zone {
-  position: relative;
-  border: 2px dashed #d1d5db;
-  border-radius: 10px;
-  padding: 16px;
-  text-align: center;
-  cursor: pointer;
-  transition: all 0.2s;
-  background: #fafbfc;
-}
-.drop-zone:hover { border-color: #4f6ef7; background: #f8f9ff; }
-.drop-zone.drag-over { border-color: #4f6ef7; background: #eef1ff; }
-.drop-zone.has-files { border-style: solid; border-color: #22c55e; background: #f0fdf4; }
-.drop-icon { display: block; font-size: 24px; margin-bottom: 2px; }
-.drop-text { display: block; font-size: 13px; font-weight: 500; color: #374151; }
-.uploading-overlay {
-  position: absolute; inset: 0;
-  display: flex; align-items: center; justify-content: center; gap: 8px;
-  background: rgba(255,255,255,.85);
-  border-radius: 10px;
-  font-size: 13px; color: #4f6ef7;
-}
-.uploading-overlay .spinner {
-  width: 16px; height: 16px;
-  border: 2px solid #e5e7eb;
-  border-top-color: #4f6ef7;
-  border-radius: 50%;
-  animation: spin .6s linear infinite;
-}
-
-/* ── File Sections ── */
-.file-section {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.file-section-body {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-}
-.section-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #6b7280;
-  padding: 8px 0 4px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  letter-spacing: 0.3px;
-}
-.section-count {
-  font-size: 11px;
-  font-weight: 500;
-  color: #9ca3af;
-  background: #f3f4f6;
-  padding: 1px 7px;
-  border-radius: 10px;
-  line-height: 18px;
-}
-.file-status {
-  padding: 8px 0;
-  font-size: 13px;
-  color: #9ca3af;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.file-status.empty { padding: 14px 0; text-align: center; justify-content: center; }
-
-.mini-spinner {
-  display: inline-block;
-  width: 12px; height: 12px;
-  border: 2px solid #e5e7eb;
-  border-top-color: #4f6ef7;
-  border-radius: 50%;
-  animation: spin .6s linear infinite;
-}
-
-/* ── File List ── */
-.file-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.file-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  transition: background 0.15s;
-  cursor: default;
-}
-.file-row:hover { background: #f0f2f5; }
-.file-icon {
-  font-size: 14px;
-  flex-shrink: 0;
-  line-height: 1;
-}
-.file-name {
-  flex: 1;
-  font-size: 13px;
-  color: #374151;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-.file-actions {
-  display: flex;
-  gap: 2px;
-  flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-.file-row:hover .file-actions,
-.file-row.selected .file-actions { opacity: 1; }
-.file-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 14px;
-  padding: 4px;
-  border-radius: 4px;
-  line-height: 1;
-  transition: background 0.15s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-}
-.file-btn:hover { background: #e5e7eb; text-decoration: none; }
-.file-btn.delete:hover { background: #fee2e2; }
-
-/* ── File Checkbox ── */
-.file-checkbox {
-  width: 16px;
-  height: 16px;
-  border: 2px solid #d1d5db;
-  border-radius: 3px;
-  flex-shrink: 0;
-  cursor: pointer;
-  transition: all 0.15s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #fff;
-}
-.file-checkbox.checked {
-  background: #4f6ef7;
-  border-color: #4f6ef7;
-}
-.file-checkbox.checked::after {
-  content: '';
-  width: 4px;
-  height: 8px;
-  border: solid #fff;
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg) translateY(-1px);
-}
-.file-row:hover .file-checkbox { border-color: #4f6ef7; }
-.file-row.selected { background: #eef1ff; }
-.file-row.selected:hover { background: #e0e5ff; }
-
-/* ── Select All Checkbox ── */
-.select-all { display: flex; align-items: center; cursor: pointer; }
-.select-all input {
-  width: 14px;
-  height: 14px;
-  accent-color: #4f6ef7;
-  cursor: pointer;
-}
-
-/* ── Batch Action Bar ── */
-.batch-bar {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 10px;
-  background: #fff;
-  border-top: 1px solid #e5e7eb;
-  margin: 0 -12px -12px;
-  box-shadow: 0 -2px 8px rgba(0,0,0,.06);
-}
-.batch-count {
-  font-size: 12px;
-  color: #374151;
-  font-weight: 500;
-  white-space: nowrap;
-}
-.batch-actions {
-  display: flex;
-  gap: 6px;
-}
-.batch-btn {
-  padding: 5px 12px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s;
-  background: #fff;
-  white-space: nowrap;
-}
-.batch-btn:hover:not(:disabled) { border-color: #4f6ef7; color: #4f6ef7; }
-.batch-btn.download:hover:not(:disabled) { background: #eef1ff; }
-.batch-btn.delete:hover:not(:disabled) { background: #fef2f2; border-color: #ef4444; color: #ef4444; }
-.batch-btn:disabled { opacity: .4; cursor: not-allowed; }
-
-/* ===== Right Panel ===== */
-.right-panel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-width: 0;
-}
-
-/* ── Chat Messages ── */
-.chat-messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.empty-chat {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  color: #9ca3af;
-  text-align: center;
-  gap: 4px;
-}
-.empty-icon { font-size: 48px; margin-bottom: 8px; }
-.empty-chat p { font-size: 14px; }
-.examples { font-size: 13px; color: #d1d5db; }
-.examples em { font-style: normal; color: #4f6ef7; }
-
-.msg-row { display: flex; gap: 10px; align-items: flex-start; }
-.msg-row.user { flex-direction: row-reverse; }
-.msg-row.system { justify-content: center; }
-.msg-row.system .bubble {
-  background: #f3f4f6; color: #6b7280; font-size: 13px; padding: 6px 14px; text-align: center;
-}
-
-.avatar {
-  width: 32px; height: 32px;
-  border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 16px;
-  flex-shrink: 0;
-  background: #f3f4f6;
-}
-.bubble {
-  max-width: 70%;
-  padding: 10px 14px;
-  border-radius: 14px;
-  font-size: 14px;
-  line-height: 1.6;
-  word-break: break-word;
-}
-.user .bubble {
-  background: #4f6ef7;
-  color: #fff;
-  border-bottom-right-radius: 4px;
-}
-.ai .bubble {
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-bottom-left-radius: 4px;
-}
-.msg-text { white-space: pre-wrap; }
-
-/* ── Output preview ── */
-.output-area { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
-.preview-img {
-  max-width: 100%; max-height: 320px;
-  border-radius: 8px;
-  border: 1px solid #e5e7eb;
-  cursor: zoom-in;
-}
-.preview-video { width: 100%; max-height: 320px; border-radius: 8px; }
-.download-link { font-size: 13px; }
-
-/* ── Thinking animation ── */
-.dot-pulse {
-  display: inline-block;
-  width: 8px; height: 8px;
-  border-radius: 50%;
-  background: #4f6ef7;
-  animation: pulse 1.2s ease-in-out infinite;
-}
-@keyframes pulse {
-  0%, 100% { opacity: .3; transform: scale(.8); }
-  50% { opacity: 1; transform: scale(1.2); }
-}
-
-/* ── Input Bar ── */
-.input-bar {
-  display: flex;
-  gap: 8px;
-  padding: 12px 20px 16px;
-  border-top: 1px solid #e5e7eb;
-  background: #f0f2f5;
-  flex-shrink: 0;
-}
-.input-bar textarea {
-  flex: 1;
-  border: 1px solid #d1d5db;
-  border-radius: 10px;
-  padding: 10px 14px;
-  font-size: 14px;
-  font-family: inherit;
-  resize: none;
-  outline: none;
-  transition: border-color .2s;
-  max-height: 120px;
-  background: #fff;
-}
-.input-bar textarea:focus { border-color: #4f6ef7; }
-.input-bar textarea:disabled { opacity: .5; }
-
-.send-btn {
-  padding: 0 20px;
-  border: none;
-  border-radius: 10px;
-  background: #4f6ef7;
-  color: #fff;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background .2s;
-  white-space: nowrap;
-}
-.send-btn:hover:not(:disabled) { background: #3b5de7; }
-.send-btn:disabled { opacity: .4; cursor: not-allowed; }
-
-.spinner-sm {
-  display: inline-block;
-  width: 16px; height: 16px;
-  border: 2px solid rgba(255,255,255,.3);
-  border-top-color: #fff;
-  border-radius: 50%;
-  animation: spin .6s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
-
-/* ── Header Spacer & Settings Button ── */
+.logo { font-size: 20px; font-weight: 700; color: #1a1a2e; white-space: nowrap; }
+.subtitle { font-size: 13px; color: #9ca3af; white-space: nowrap; }
 .header-spacer { flex: 1; }
+
+/* ── Header Controls ── */
 .mode-switch {
   display: flex;
   background: #f3f4f6;
@@ -1049,68 +202,135 @@ a:hover { text-decoration: underline; }
 .mode-btn.active {
   background: #fff;
   color: #4f6ef7;
-  box-shadow: 0 1px 3px rgba(0,0,0,.1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
-.settings-btn {
-  background: none; border: 1px solid #e5e7eb; border-radius: 8px;
-  cursor: pointer; font-size: 18px; padding: 4px 10px; line-height: 1;
+.icon-btn {
+  background: none;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px 10px;
+  line-height: 1;
   transition: all 0.15s;
 }
-.settings-btn:hover { background: #f3f4f6; border-color: #d1d5db; }
+.icon-btn:hover { background: #f3f4f6; border-color: #d1d5db; }
+.icon-btn.active { background: #eef1ff; border-color: #4f6ef7; }
 
-/* ── Modal ── */
-.modal-overlay {
-  position: fixed; inset: 0; z-index: 1000;
-  background: rgba(0,0,0,.35);
-  display: flex; align-items: center; justify-content: center;
+/* ── Body (two-column) ── */
+.body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
 }
-.modal {
-  background: #fff; border-radius: 14px; width: 480px; max-width: 90vw;
-  box-shadow: 0 8px 32px rgba(0,0,0,.15);
-  display: flex; flex-direction: column;
-}
-.modal-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 16px 20px; border-bottom: 1px solid #e5e7eb;
-  font-size: 16px; font-weight: 600;
-}
-.modal-close {
-  background: none; border: none; font-size: 22px; cursor: pointer;
-  color: #9ca3af; line-height: 1;
-}
-.modal-close:hover { color: #374151; }
-.modal-body {
-  padding: 20px; display: flex; flex-direction: column; gap: 14px;
-}
-.settings-field {
-  display: flex; flex-direction: column; gap: 4px;
-  font-size: 13px; font-weight: 500; color: #374151;
-}
-.settings-field input {
-  padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 8px;
-  font-size: 14px; font-family: inherit; outline: none; transition: border-color .2s;
-}
-.settings-field input:focus { border-color: #4f6ef7; }
-.modal-footer {
-  display: flex; justify-content: flex-end; gap: 8px;
-  padding: 14px 20px; border-top: 1px solid #e5e7eb;
-}
-.btn-cancel, .btn-save {
-  padding: 8px 20px; border-radius: 8px; font-size: 14px; font-weight: 500;
-  cursor: pointer; border: 1px solid #d1d5db; transition: all .15s;
-}
-.btn-cancel { background: #fff; color: #374151; }
-.btn-cancel:hover { background: #f3f4f6; }
-.btn-save { background: #4f6ef7; color: #fff; border-color: #4f6ef7; }
-.btn-save:hover:not(:disabled) { background: #3b5de7; }
-.btn-save:disabled { opacity: .5; cursor: not-allowed; }
 
-.settings-hint {
-  text-align: center; font-size: 14px; color: #ef4444; font-weight: 500;
-  padding-bottom: 4px;
+/* 左侧面板折叠（类名由父级传入，命中 FilePanel 根元素） */
+.left-panel { transition: margin-left 0.25s ease; }
+.left-panel.collapsed { margin-left: -361px; }
+
+/* ===== Right Panel ===== */
+.right-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
 }
-.modal-overlay.mandatory .modal {
-  box-shadow: 0 8px 32px rgba(0,0,0,.25);
-  border: 2px solid #4f6ef7;
+
+/* ── Chat Messages ── */
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.chat-messages::-webkit-scrollbar { width: 8px; }
+.chat-messages::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
+
+.empty-chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #9ca3af;
+  text-align: center;
+  gap: 4px;
+}
+.empty-icon { font-size: 48px; margin-bottom: 8px; }
+.empty-chat p { font-size: 14px; }
+.examples {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
+  max-width: 480px;
+}
+.example-chip {
+  border: 1px solid #d1d5db;
+  background: #fff;
+  color: #4f6ef7;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.example-chip:hover { border-color: #4f6ef7; background: #eef1ff; }
+
+/* ── Input Bar ── */
+.input-bar {
+  display: flex;
+  gap: 8px;
+  padding: 12px 20px 16px;
+  border-top: 1px solid #e5e7eb;
+  background: #f0f2f5;
+  flex-shrink: 0;
+}
+.input-bar textarea {
+  flex: 1;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  resize: none;
+  outline: none;
+  transition: border-color 0.2s;
+  max-height: 120px;
+  background: #fff;
+}
+.input-bar textarea:focus { border-color: #4f6ef7; }
+.input-bar textarea:disabled { opacity: 0.5; }
+
+.send-btn {
+  padding: 0 20px;
+  border: none;
+  border-radius: 10px;
+  background: #4f6ef7;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+.send-btn:hover:not(:disabled) { background: #3b5de7; }
+.send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.send-btn.stop { background: #ef4444; }
+.send-btn.stop:hover { background: #dc2626; }
+
+/* ── Keyframes ── */
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Responsive ── */
+@media (max-width: 640px) {
+  .subtitle { display: none; }
+  .header { padding: 10px 12px; }
+  .chat-messages { padding: 12px; }
+  .input-bar { padding: 10px 12px 12px; }
 }
 </style>
