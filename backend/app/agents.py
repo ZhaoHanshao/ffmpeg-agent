@@ -10,6 +10,12 @@ _search_tool_limit = ToolCallLimitMiddleware(
     thread_limit=10,
 )
 
+_execute_tool_limit = ToolCallLimitMiddleware(
+    tool_name="execute_command",
+    run_limit=3,
+    thread_limit=3,
+)
+
 _search_prompt = (
     '你是一个 FFmpeg 知识库查询助手。'
     '你的任务是根据用户的 FFmpeg 相关问题，使用 get_command 工具查询知识库，知识库为英文知识库，用英文进行查询，'
@@ -51,7 +57,7 @@ def _build_agents():
         return None, None, None
     return (
         create_agent(model=m, system_prompt=SystemMessage(content=_search_prompt), tools=[get_command], middleware=[_search_tool_limit]),
-        create_agent(model=m, system_prompt=SystemMessage(content=_execute_prompt), tools=[get_files, execute_command]),
+        create_agent(model=m, system_prompt=SystemMessage(content=_execute_prompt), tools=[get_files, execute_command], middleware=[_execute_tool_limit]),
         create_agent(model=m, system_prompt=SystemMessage(content=_chat_prompt), tools=[]),
     )
 
@@ -74,6 +80,12 @@ _probe_search_tool_limit = ToolCallLimitMiddleware(
     tool_name="get_probe_command",
     run_limit=10,
     thread_limit=10,
+)
+
+_probe_execute_tool_limit = ToolCallLimitMiddleware(
+    tool_name="execute_probe_command",
+    run_limit=3,
+    thread_limit=3,
 )
 
 _probe_search_prompt = (
@@ -118,7 +130,7 @@ def _build_probe_agents():
         return None, None, None
     return (
         create_agent(model=m, system_prompt=SystemMessage(content=_probe_search_prompt), tools=[get_probe_command], middleware=[_probe_search_tool_limit]),
-        create_agent(model=m, system_prompt=SystemMessage(content=_probe_execute_prompt), tools=[get_files, execute_probe_command]),
+        create_agent(model=m, system_prompt=SystemMessage(content=_probe_execute_prompt), tools=[get_files, execute_probe_command], middleware=[_probe_execute_tool_limit]),
         create_agent(model=m, system_prompt=SystemMessage(content=_probe_chat_prompt), tools=[]),
     )
 

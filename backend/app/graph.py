@@ -5,6 +5,9 @@ from langchain.messages import ToolMessage, AnyMessage, AIMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
 
+MAX_SEARCH_COUNT = 10
+MAX_EXECUTE_COUNT = 3
+
 
 class state(MessagesState):
     command: str = None
@@ -14,6 +17,7 @@ class state(MessagesState):
     flag: bool = False
     output_file: str = ''
     search_count: int = 0
+    execute_count: int = 0
     progress: list = None
 
 
@@ -26,7 +30,7 @@ def search(state: state):
     if state.get('progress') is not None:
         state['progress'].append('正在查询知识库...')
 
-    if state.get('search_count', 0) >= 10:
+    if state.get('search_count', 0) >= MAX_SEARCH_COUNT:
         logger.info('查询次数已达上限（10 次），跳过后续查询')
         return {
             **state,
@@ -56,6 +60,8 @@ def execute(state: state):
         state['progress'].append('正在执行命令...')
 
     logger.info('执行命令')
+    state['execute_count'] = state.get('execute_count', 0) + 1
+    logger.info(f'执行次数：{state["execute_count"]}/{MAX_EXECUTE_COUNT}')
     user_question = state['history'][0].content if state.get('history') else ''
     execute_prompt = (
         f'用户问题：{user_question}\n\n'
@@ -83,7 +89,13 @@ def execute(state: state):
 
 
 def which_continue_exec(state: state):
-    branch = END if state['flag'] else 'execute'
+    if state['flag']:
+        branch = END
+    elif state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
+        logger.info(f'执行次数已达上限（{MAX_EXECUTE_COUNT} 次），强制结束')
+        branch = END
+    else:
+        branch = 'execute'
     logger.info(f'路由决策：{branch}')
     return branch
 
@@ -113,6 +125,7 @@ def exec_graph(question: str, progress: list = None) -> dict:
         "flag": False,
         "output_file": "",
         "search_count": 0,
+        "execute_count": 0,
         "progress": progress,
     })
     return result
@@ -145,7 +158,7 @@ def probe_search(state: state):
     if state.get('progress') is not None:
         state['progress'].append('正在查询 ffprobe 知识库...')
 
-    if state.get('search_count', 0) >= 10:
+    if state.get('search_count', 0) >= MAX_SEARCH_COUNT:
         logger.info('ffprobe 查询次数已达上限（10 次），跳过后续查询')
         return {
             **state,
@@ -175,6 +188,8 @@ def probe_execute(state: state):
         state['progress'].append('正在执行 ffprobe 命令...')
 
     logger.info('执行 ffprobe 命令')
+    state['execute_count'] = state.get('execute_count', 0) + 1
+    logger.info(f'执行次数：{state["execute_count"]}/{MAX_EXECUTE_COUNT}')
     user_question = state['history'][0].content if state.get('history') else ''
     execute_prompt = (
         f'用户问题：{user_question}\n\n'
@@ -219,6 +234,7 @@ def probe_exec_graph(question: str, progress: list = None) -> dict:
         "flag": False,
         "output_file": "",
         "search_count": 0,
+        "execute_count": 0,
         "progress": progress,
     })
     return result
