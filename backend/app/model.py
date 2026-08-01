@@ -6,7 +6,7 @@ _model_config = {
     'base_url': None,
     'api_key': None,
     'temperature': 0.2,
-    'max_tokens': 2048,
+    'max_tokens': 1024,
     'streaming': True,
 }
 

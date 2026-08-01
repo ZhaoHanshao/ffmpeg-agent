@@ -5,8 +5,8 @@ from langchain.messages import ToolMessage, AnyMessage, AIMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
 
-MAX_SEARCH_COUNT = 10
-MAX_EXECUTE_COUNT = 3
+MAX_SEARCH_COUNT = 5
+MAX_EXECUTE_COUNT = 2
 
 
 class state(MessagesState):
@@ -31,10 +31,10 @@ def search(state: state):
         state['progress'].append('正在查询知识库...')
 
     if state.get('search_count', 0) >= MAX_SEARCH_COUNT:
-        logger.info('查询次数已达上限（10 次），跳过后续查询')
+        logger.info(f'查询次数已达上限（{MAX_SEARCH_COUNT} 次），跳过后续查询')
         return {
             **state,
-            'result': ['已达到最大查询次数（10 次），请基于现有信息继续'],
+            'result': [f'已达到最大查询次数（{MAX_SEARCH_COUNT} 次），请基于现有信息继续'],
         }
     logger.info('执行查询')
     mes = state['messages']
@@ -159,10 +159,10 @@ def probe_search(state: state):
         state['progress'].append('正在查询 ffprobe 知识库...')
 
     if state.get('search_count', 0) >= MAX_SEARCH_COUNT:
-        logger.info('ffprobe 查询次数已达上限（10 次），跳过后续查询')
+        logger.info(f'ffprobe 查询次数已达上限（{MAX_SEARCH_COUNT} 次），跳过后续查询')
         return {
             **state,
-            'result': ['已达到最大查询次数（10 次），请基于现有信息继续'],
+            'result': [f'已达到最大查询次数（{MAX_SEARCH_COUNT} 次），请基于现有信息继续'],
         }
     logger.info('执行 ffprobe 查询')
     mes = state['messages']

@@ -6,14 +6,14 @@ from langchain.messages import SystemMessage
 
 _search_tool_limit = ToolCallLimitMiddleware(
     tool_name="get_command",
-    run_limit=10,
-    thread_limit=10,
+    run_limit=5,
+    thread_limit=5,
 )
 
 _execute_tool_limit = ToolCallLimitMiddleware(
     tool_name="execute_command",
-    run_limit=3,
-    thread_limit=3,
+    run_limit=2,
+    thread_limit=2,
 )
 
 _search_prompt = (
@@ -78,14 +78,14 @@ def ensure_agents():
 
 _probe_search_tool_limit = ToolCallLimitMiddleware(
     tool_name="get_probe_command",
-    run_limit=10,
-    thread_limit=10,
+    run_limit=5,
+    thread_limit=5,
 )
 
 _probe_execute_tool_limit = ToolCallLimitMiddleware(
     tool_name="execute_probe_command",
-    run_limit=3,
-    thread_limit=3,
+    run_limit=2,
+    thread_limit=2,
 )
 
 _probe_search_prompt = (
