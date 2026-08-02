@@ -302,9 +302,12 @@ a:hover { text-decoration: underline; }
   font-family: inherit;
   resize: none;
   outline: none;
+  overflow: hidden;
+  scrollbar-width: none;
   transition: border-color 0.2s;
   background: #fff;
 }
+.input-bar textarea::-webkit-scrollbar { display: none; }
 .input-bar textarea:focus { border-color: #4f6ef7; }
 .input-bar textarea:disabled { opacity: 0.5; }
 
