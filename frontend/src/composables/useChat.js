@@ -1,4 +1,4 @@
-import { ref, computed, nextTick } from 'vue'
+import { ref, reactive, computed, nextTick } from 'vue'
 import { API_BASE } from '../api'
 
 const NEAR_BOTTOM_THRESHOLD = 120
@@ -50,7 +50,7 @@ export function useChat(mode) {
 
     messages.value.push({ role: 'user', text })
     question.value = ''
-    const reply = { role: 'ai', text: '', outputFile: '' }
+    const reply = reactive({ role: 'ai', text: '', outputFile: '' })
     messages.value.push(reply)
     sending.value = true
     autoScroll.value = true
@@ -85,9 +85,9 @@ export function useChat(mode) {
         for (const line of lines) {
           const trimmed = line.trim()
           if (!trimmed.startsWith('data: ')) continue
-          if (trimmed.slice(6) === '{"event":"done"}') continue
           try {
             const data = JSON.parse(trimmed.slice(6))
+            if (data.event === 'done') continue
             if (data.event === 'status') {
               lastStatus = data.text
               reply.text = `⏳ ${data.text}`

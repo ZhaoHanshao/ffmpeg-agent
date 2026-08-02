@@ -1,10 +1,8 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { marked } from 'marked'
 import { API_BASE } from '../api'
 import { isImage, isVideo, sanitizeHtml } from '../utils'
-
-marked.use({ breaks: true })
 
 const props = defineProps({
   msg: { type: Object, required: true },
@@ -14,16 +12,20 @@ const props = defineProps({
 // 且同一文本不会重复解析
 const rendered = computed(() => sanitizeHtml(marked.parse(props.msg.text || '')))
 
-const copied = ref(false)
-
-async function copyText() {
-  try {
-    await navigator.clipboard.writeText(props.msg.text || '')
-    copied.value = true
-    setTimeout(() => (copied.value = false), 1500)
-  } catch {
+// v-html 内容里的代码块复制按钮，通过事件委托绑定
+function onMsgClick(e) {
+  const btn = e.target.closest('.code-copy')
+  if (!btn) return
+  const block = btn.closest('.code-block')
+  const code = block?.querySelector('pre code')
+  if (!code) return
+  const text = code.textContent.replace(/\n$/, '')
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = '✓ 已复制'
+    setTimeout(() => (btn.textContent = '⧉ 复制'), 1500)
+  }).catch(() => {
     // 剪贴板不可用时静默忽略
-  }
+  })
 }
 </script>
 
@@ -31,12 +33,7 @@ async function copyText() {
   <div class="msg-row" :class="msg.role">
     <div class="avatar">{{ msg.role === 'user' ? '👤' : msg.role === 'ai' ? '🤖' : '⚙️' }}</div>
     <div class="bubble">
-      <div class="msg-text" v-html="rendered" />
-      <div v-if="msg.role === 'ai' && msg.text" class="msg-actions">
-        <button class="copy-btn" :title="copied ? '已复制' : '复制'" @click="copyText">
-          {{ copied ? '✓ 已复制' : '⧉ 复制' }}
-        </button>
-      </div>
+      <div class="msg-text" v-html="rendered" @click="onMsgClick" />
       <div v-if="msg.outputFile" class="output-area">
         <img
           v-if="isImage(msg.outputFile)"
@@ -95,7 +92,7 @@ async function copyText() {
 .user .bubble { background: #4f6ef7; color: #fff; border-bottom-right-radius: 4px; }
 .ai .bubble { background: #fff; border: 1px solid #e5e7eb; border-bottom-left-radius: 4px; }
 
-.msg-text { white-space: pre-wrap; }
+.msg-text { white-space: normal; }
 .msg-text :deep(p) { margin: 0 0 8px; }
 .msg-text :deep(p:last-child) { margin-bottom: 0; }
 .msg-text :deep(h1), .msg-text :deep(h2), .msg-text :deep(h3), .msg-text :deep(h4) {
@@ -110,10 +107,34 @@ async function copyText() {
   font-size: 12.5px;
   font-family: Consolas, 'Courier New', monospace;
 }
+.msg-text :deep(img) {
+  max-width: 100%;
+  height: auto;
+  object-fit: contain;
+  border-radius: 8px;
+}
+.msg-text :deep(.code-block) { position: relative; margin: 8px 0; }
+.msg-text :deep(.code-copy) {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  background: rgba(255, 255, 255, 0.1);
+  color: #cbd5e1;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 5px;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.msg-text :deep(.code-block:hover .code-copy) { opacity: 1; }
+.msg-text :deep(.code-copy:hover) { background: rgba(255, 255, 255, 0.2); color: #fff; }
 .msg-text :deep(pre) {
   background: #0f172a;
   color: #e2e8f0;
-  padding: 10px 12px;
+  padding: 32px 12px 10px;
   border-radius: 8px;
   overflow-x: auto;
   margin: 8px 0;
@@ -137,23 +158,11 @@ async function copyText() {
 .user .msg-text :deep(code) { background: rgba(255, 255, 255, 0.2); }
 .user .msg-text :deep(a) { color: #c7d2fe; }
 
-.msg-actions { margin-top: 6px; opacity: 0; transition: opacity 0.15s; }
-.bubble:hover .msg-actions { opacity: 1; }
-.copy-btn {
-  background: none;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  font-size: 11px;
-  color: #6b7280;
-  cursor: pointer;
-  padding: 2px 8px;
-}
-.copy-btn:hover { border-color: #4f6ef7; color: #4f6ef7; }
-
 .output-area { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .preview-img {
   max-width: 100%;
-  max-height: 320px;
+  height: auto;
+  object-fit: contain;
   border-radius: 8px;
   border: 1px solid #e5e7eb;
 }
