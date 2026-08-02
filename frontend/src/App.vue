@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch, nextTick } from 'vue'
 import { useChat } from './composables/useChat'
 import { useSettings } from './composables/useSettings'
 import MessageItem from './components/MessageItem.vue'
@@ -44,6 +44,9 @@ function autoResize() {
   el.style.height = 'auto'
   el.style.height = `${el.scrollHeight}px`
 }
+
+// 发送后 question 被清空（不触发 input 事件），watch 确保高度复位
+watch(question, () => nextTick(autoResize))
 
 function onKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -300,7 +303,6 @@ a:hover { text-decoration: underline; }
   resize: none;
   outline: none;
   transition: border-color 0.2s;
-  max-height: 120px;
   background: #fff;
 }
 .input-bar textarea:focus { border-color: #4f6ef7; }
