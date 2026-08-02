@@ -1,12 +1,13 @@
-import os, shlex, json, logging
+import os, json, logging
 from app.agents import ensure_agents, ensure_probe_agents
+from app.tools import split_command
 from langgraph.graph import START, END, StateGraph, MessagesState
 from langchain.messages import ToolMessage, AnyMessage, AIMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
 
 MAX_SEARCH_COUNT = 5
-MAX_EXECUTE_COUNT = 2
+MAX_EXECUTE_COUNT = 3
 
 
 class state(MessagesState):
@@ -39,7 +40,7 @@ def search(state: state):
     logger.info('执行查询')
     mes = state['messages']
     state['history'] = mes
-    if state['flag']:
+    if state['flag'] or state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
         return state
     if state['command'] is not None:
         res = agent_search.invoke({'messages': [*mes, HumanMessage(content=state['command_result'])]})
@@ -77,7 +78,7 @@ def execute(state: state):
                     state['flag'] = data.get('flag', False)
                     state['command_result'] = data.get('command_result', '')
                     if data.get('flag') and data.get('command'):
-                        parts = shlex.split(data['command'])
+                        parts = split_command(data['command'])
                         for part in reversed(parts):
                             if not part.startswith('-'):
                                 state['output_file'] = os.path.basename(part)
@@ -167,7 +168,7 @@ def probe_search(state: state):
     logger.info('执行 ffprobe 查询')
     mes = state['messages']
     state['history'] = mes
-    if state['flag']:
+    if state['flag'] or state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
         return state
     if state['command'] is not None:
         res = agent_probe_search.invoke({'messages': [*mes, HumanMessage(content=state['command_result'])]})

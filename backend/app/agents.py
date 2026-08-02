@@ -12,8 +12,8 @@ _search_tool_limit = ToolCallLimitMiddleware(
 
 _execute_tool_limit = ToolCallLimitMiddleware(
     tool_name="execute_command",
-    run_limit=2,
-    thread_limit=2,
+    run_limit=1,
+    thread_limit=1,
 )
 
 _search_prompt = (
@@ -34,8 +34,7 @@ _execute_prompt = (
     '5. 一个任务只执行一次 ffmpeg，不要重复尝试多种参数\n'
     '6. 如果 ffmpeg 成功（返回 flag=true），立即结束，不要继续尝试其他命令\n'
     '7. 不要执行 convert、dwebp、apt-get、sudo、pip、python、ls、pwd、find、which 等非 ffmpeg 命令\n'
-    '8. 如果 ffmpeg 执行失败，分析 stderr 后最多再重试一次修正后的命令\n'
-    '9. 如果最终结果仍失败，返回失败原因。'
+    '8. 如果 ffmpeg 执行失败，不要重试，直接返回失败原因。'
 )
 
 _chat_prompt = (
@@ -84,8 +83,8 @@ _probe_search_tool_limit = ToolCallLimitMiddleware(
 
 _probe_execute_tool_limit = ToolCallLimitMiddleware(
     tool_name="execute_probe_command",
-    run_limit=2,
-    thread_limit=2,
+    run_limit=1,
+    thread_limit=1,
 )
 
 _probe_search_prompt = (
@@ -107,8 +106,7 @@ _probe_execute_prompt = (
     '6. 一个任务只执行一次 ffprobe，不要重复尝试多种参数\n'
     '7. 如果 ffprobe 成功（返回 flag=true），立即结束，不要继续尝试其他命令\n'
     '8. 不要执行 ffmpeg、convert、apt-get、sudo、pip、python、ls、pwd、find、which 等非 ffprobe 命令\n'
-    '9. 如果 ffprobe 执行失败，分析 stderr 后最多再重试一次修正后的命令\n'
-    '10. 如果最终结果仍失败，返回失败原因。'
+    '9. 如果 ffprobe 执行失败，不要重试，直接返回失败原因。'
 )
 
 _probe_chat_prompt = (
