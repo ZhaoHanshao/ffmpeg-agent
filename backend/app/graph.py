@@ -1,9 +1,13 @@
-import os, shlex, json, logging
+import os, json, logging
 from app.agents import ensure_agents, ensure_probe_agents
+from app.tools import split_command
 from langgraph.graph import START, END, StateGraph, MessagesState
 from langchain.messages import ToolMessage, AnyMessage, AIMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
+
+MAX_SEARCH_COUNT = 5
+MAX_EXECUTE_COUNT = 3
 
 
 class state(MessagesState):
@@ -14,6 +18,7 @@ class state(MessagesState):
     flag: bool = False
     output_file: str = ''
     search_count: int = 0
+    execute_count: int = 0
     progress: list = None
 
 
@@ -26,16 +31,16 @@ def search(state: state):
     if state.get('progress') is not None:
         state['progress'].append('正在查询知识库...')
 
-    if state.get('search_count', 0) >= 10:
-        logger.info('查询次数已达上限（10 次），跳过后续查询')
+    if state.get('search_count', 0) >= MAX_SEARCH_COUNT:
+        logger.info(f'查询次数已达上限（{MAX_SEARCH_COUNT} 次），跳过后续查询')
         return {
             **state,
-            'result': ['已达到最大查询次数（10 次），请基于现有信息继续'],
+            'result': [f'已达到最大查询次数（{MAX_SEARCH_COUNT} 次），请基于现有信息继续'],
         }
     logger.info('执行查询')
     mes = state['messages']
     state['history'] = mes
-    if state['flag']:
+    if state['flag'] or state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
         return state
     if state['command'] is not None:
         res = agent_search.invoke({'messages': [*mes, HumanMessage(content=state['command_result'])]})
@@ -56,6 +61,8 @@ def execute(state: state):
         state['progress'].append('正在执行命令...')
 
     logger.info('执行命令')
+    state['execute_count'] = state.get('execute_count', 0) + 1
+    logger.info(f'执行次数：{state["execute_count"]}/{MAX_EXECUTE_COUNT}')
     user_question = state['history'][0].content if state.get('history') else ''
     execute_prompt = (
         f'用户问题：{user_question}\n\n'
@@ -71,7 +78,7 @@ def execute(state: state):
                     state['flag'] = data.get('flag', False)
                     state['command_result'] = data.get('command_result', '')
                     if data.get('flag') and data.get('command'):
-                        parts = shlex.split(data['command'])
+                        parts = split_command(data['command'])
                         for part in reversed(parts):
                             if not part.startswith('-'):
                                 state['output_file'] = os.path.basename(part)
@@ -83,7 +90,13 @@ def execute(state: state):
 
 
 def which_continue_exec(state: state):
-    branch = END if state['flag'] else 'execute'
+    if state['flag']:
+        branch = END
+    elif state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
+        logger.info(f'执行次数已达上限（{MAX_EXECUTE_COUNT} 次），强制结束')
+        branch = END
+    else:
+        branch = 'execute'
     logger.info(f'路由决策：{branch}')
     return branch
 
@@ -113,6 +126,7 @@ def exec_graph(question: str, progress: list = None) -> dict:
         "flag": False,
         "output_file": "",
         "search_count": 0,
+        "execute_count": 0,
         "progress": progress,
     })
     return result
@@ -145,16 +159,16 @@ def probe_search(state: state):
     if state.get('progress') is not None:
         state['progress'].append('正在查询 ffprobe 知识库...')
 
-    if state.get('search_count', 0) >= 10:
-        logger.info('ffprobe 查询次数已达上限（10 次），跳过后续查询')
+    if state.get('search_count', 0) >= MAX_SEARCH_COUNT:
+        logger.info(f'ffprobe 查询次数已达上限（{MAX_SEARCH_COUNT} 次），跳过后续查询')
         return {
             **state,
-            'result': ['已达到最大查询次数（10 次），请基于现有信息继续'],
+            'result': [f'已达到最大查询次数（{MAX_SEARCH_COUNT} 次），请基于现有信息继续'],
         }
     logger.info('执行 ffprobe 查询')
     mes = state['messages']
     state['history'] = mes
-    if state['flag']:
+    if state['flag'] or state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
         return state
     if state['command'] is not None:
         res = agent_probe_search.invoke({'messages': [*mes, HumanMessage(content=state['command_result'])]})
@@ -175,6 +189,8 @@ def probe_execute(state: state):
         state['progress'].append('正在执行 ffprobe 命令...')
 
     logger.info('执行 ffprobe 命令')
+    state['execute_count'] = state.get('execute_count', 0) + 1
+    logger.info(f'执行次数：{state["execute_count"]}/{MAX_EXECUTE_COUNT}')
     user_question = state['history'][0].content if state.get('history') else ''
     execute_prompt = (
         f'用户问题：{user_question}\n\n'
@@ -219,6 +235,7 @@ def probe_exec_graph(question: str, progress: list = None) -> dict:
         "flag": False,
         "output_file": "",
         "search_count": 0,
+        "execute_count": 0,
         "progress": progress,
     })
     return result

@@ -12,6 +12,17 @@ DOWNLOAD = os.getenv('DOWNLOAD', 'backend/download')
 UPLOAD = os.getenv('UPLOAD', 'backend/upload')
 
 
+def split_command(cmd: str) -> list:
+    """按 Windows 规则拆分命令，保留路径反斜杠并去掉引用引号。"""
+    parts = shlex.split(cmd, posix=False)
+    result = []
+    for p in parts:
+        if len(p) >= 2 and p[0] == '"' and p[-1] == '"':
+            p = p[1:-1].replace('""', '"')
+        result.append(p)
+    return result
+
+
 @tool
 def get_command(squry: str):
     """
@@ -79,7 +90,7 @@ def execute_command(command: str):
     logger.info(f'原始命令：{command}')
 
     # 安全校验：只允许以 ffmpeg 开头的命令
-    cmd_name = shlex.split(command)[0]
+    cmd_name = split_command(command)[0]
     if cmd_name != 'ffmpeg':
         logger.info(f'拒绝执行非 ffmpeg 命令：{cmd_name}')
         return {
@@ -88,7 +99,7 @@ def execute_command(command: str):
         }
 
     # 将输出路径强制重写到 DOWNLOAD 目录
-    parts = shlex.split(command)
+    parts = split_command(command)
     output_idx = None
     for i in range(len(parts) - 1, -1, -1):
         if i == 0:
@@ -103,7 +114,7 @@ def execute_command(command: str):
         # 仅当路径尚未指向 DOWNLOAD 时才重写
         if DOWNLOAD not in original and DOWNLOAD not in os.path.dirname(original):
             parts[output_idx] = os.path.join(DOWNLOAD, os.path.basename(original))
-            command = shlex.join(parts)
+            command = subprocess.list2cmdline(parts)
             logger.info(f'输出路径已重写至 {DOWNLOAD}/')
 
     logger.info(f'执行命令：{command}')
@@ -117,7 +128,7 @@ def execute_command(command: str):
                 os.remove(fp)
 
     try:
-        exit_code = subprocess.run(args=shlex.split(command), capture_output=True)
+        exit_code = subprocess.run(args=split_command(command), capture_output=True)
         if exit_code.returncode == 0:
             return {'command': command, 'flag': True, 'command_result': f'{command} 执行成功'}
         else:
@@ -144,7 +155,7 @@ def execute_probe_command(command: str):
     logger.info(f'原始命令：{command}')
 
     # 安全校验：只允许以 ffprobe 开头的命令
-    cmd_name = shlex.split(command)[0]
+    cmd_name = split_command(command)[0]
     if cmd_name != 'ffprobe':
         logger.info(f'拒绝执行非 ffprobe 命令：{cmd_name}')
         return {
@@ -153,7 +164,7 @@ def execute_probe_command(command: str):
         }
 
     try:
-        proc = subprocess.run(args=shlex.split(command), capture_output=True)
+        proc = subprocess.run(args=split_command(command), capture_output=True)
         if proc.returncode == 0:
             output = proc.stdout.decode(errors='replace').strip()
             return {

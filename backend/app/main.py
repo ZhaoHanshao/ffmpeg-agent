@@ -17,9 +17,14 @@ os.chdir(os.path.dirname(_backend_dir))
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
+# 重依赖（langchain → transformers/torch）导入可能耗时数十秒，先打印提示避免"长时间无输出"
+print('正在启动 FFmpeg Agent，加载后端依赖（首次约需 10~60 秒）...', flush=True)
+
 from app.graph import exec_graph, build_chat_prompt, probe_exec_graph, build_probe_chat_prompt
 from app.agents import ensure_agents, ensure_probe_agents
 from langchain.messages import HumanMessage
+
+print('后端依赖加载完成', flush=True)
 
 load_dotenv()
 
