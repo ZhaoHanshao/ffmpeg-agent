@@ -1,6 +1,4 @@
 <script setup>
-import { defineModel } from 'vue'
-
 const settings = defineModel({ type: Object, required: true })
 const show = defineModel('show', { type: Boolean, default: false })
 defineProps({
