@@ -10,10 +10,11 @@ const emit = defineEmits(['remove', 'add'])
   <div class="selected-bar">
     <span class="bar-label">已选择</span>
     <div class="chip-list">
-      <span v-for="f in files" :key="f" class="chip" :title="f">
-        <span class="chip-icon">📄</span>
-        <span class="chip-name">{{ f }}</span>
-        <button class="chip-remove" title="移除选择（不删除文件）" @click="emit('remove', f)">✕</button>
+      <span v-for="s in files" :key="`${s.src}-${s.name}`" class="chip" :title="s.name">
+        <span class="chip-icon">{{ s.src === 'output' ? '🎯' : '📄' }}</span>
+        <span class="chip-name">{{ s.name }}</span>
+        <span v-if="s.src === 'output'" class="chip-tag">输出</span>
+        <button class="chip-remove" title="移除选择（不删除文件）" @click="emit('remove', s)">✕</button>
       </span>
       <button class="chip-add" title="上传并添加文件" @click="emit('add')">＋ 添加</button>
     </div>
@@ -60,7 +61,16 @@ const emit = defineEmits(['remove', 'add'])
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 220px;
+  max-width: 200px;
+}
+.chip-tag {
+  font-size: 10px;
+  color: #b45309;
+  background: #fef3c7;
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 16px;
+  flex-shrink: 0;
 }
 .chip-remove {
   background: none;

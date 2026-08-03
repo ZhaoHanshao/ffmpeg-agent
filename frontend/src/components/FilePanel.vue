@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { api, API_BASE } from '../api'
 
-const emit = defineEmits(['notify', 'toggle-select', 'removed'])
+const emit = defineEmits(['notify', 'select-output', 'removed'])
 
 const props = defineProps({
   selectedFiles: { type: Array, default: () => [] },
@@ -91,14 +91,18 @@ async function doUpload(files) {
   }
 }
 
-function toggleSelect(filename) {
-  emit('toggle-select', filename)
+function addToWorkspace(filename, src) {
+  emit('select-output', filename, src)
+}
+
+function isSelected(src, name) {
+  return props.selectedFiles.some((s) => s.src === src && s.name === name)
 }
 
 async function deleteUploadedFile(filename) {
   try {
     await api.deleteUpload(filename)
-    emit('removed', filename)
+    emit('removed', filename, 'upload')
     await refreshUploadedFiles()
   } catch (e) {
     emit('notify', `删除失败: ${e.message}`)
@@ -108,6 +112,7 @@ async function deleteUploadedFile(filename) {
 async function deleteOutputFile(filename) {
   try {
     await api.deleteOutput(filename)
+    emit('removed', filename, 'output')
     const s = new Set(selectedOutput.value)
     s.delete(filename)
     selectedOutput.value = s
@@ -198,26 +203,24 @@ onMounted(refreshAll)
             v-for="f in uploadedFiles"
             :key="f"
             class="file-row"
-            :class="{ selected: props.selectedFiles.includes(f) }"
-            @click="toggleSelect(f)"
+            :class="{ selected: isSelected('upload', f) }"
           >
-            <span
-              class="file-checkbox"
-              :class="{ checked: props.selectedFiles.includes(f) }"
-              title="选择/取消选择"
-              @click.stop="toggleSelect(f)"
-            />
             <span class="file-icon">📄</span>
             <span class="file-name" :title="f">{{ f }}</span>
             <div class="file-actions">
+              <button
+                class="file-btn add"
+                :class="{ active: isSelected('upload', f) }"
+                title="加入工作区"
+                @click="addToWorkspace(f, 'upload')"
+              >＋</button>
               <a
                 :href="`${API_BASE}/upload/${encodeURIComponent(f)}`"
                 class="file-btn download"
                 title="下载"
                 download
-                @click.stop
               >⬇</a>
-              <button class="file-btn delete" title="删除" @click.stop="deleteUploadedFile(f)">🗑</button>
+              <button class="file-btn delete" title="删除" @click="deleteUploadedFile(f)">🗑</button>
             </div>
           </div>
         </div>
@@ -251,6 +254,12 @@ onMounted(refreshAll)
             <span class="file-icon">🎯</span>
             <span class="file-name" :title="f">{{ f }}</span>
             <div class="file-actions">
+              <button
+                class="file-btn add"
+                :class="{ active: isSelected('output', f) }"
+                title="加入工作区"
+                @click.stop="addToWorkspace(f, 'output')"
+              >＋</button>
               <a
                 :href="`${API_BASE}/output/${encodeURIComponent(f)}`"
                 class="file-btn download"
@@ -430,6 +439,8 @@ onMounted(refreshAll)
   height: 28px;
 }
 .file-btn:hover { background: #e5e7eb; text-decoration: none; }
+.file-btn.add:hover { background: #eef1ff; }
+.file-btn.add.active { background: #eef1ff; color: #4f6ef7; font-weight: 700; }
 .file-btn.delete:hover { background: #fee2e2; }
 
 .file-checkbox {

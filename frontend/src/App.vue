@@ -36,16 +36,21 @@ const textareaRef = ref(null)
 const filePanel = ref(null)
 
 // ── 选中的待处理文件（仅本地选择态，不移除服务器文件） ──
+// 元素：{ name: 文件名, src: 'upload' | 'output' }
 const selectedFiles = ref([])
 
-function toggleSelect(name) {
-  selectedFiles.value = selectedFiles.value.includes(name)
-    ? selectedFiles.value.filter((f) => f !== name)
-    : [...selectedFiles.value, name]
+function addToWorkspace(name, src) {
+  if (!selectedFiles.value.some((s) => s.src === src && s.name === name)) {
+    selectedFiles.value.push({ name, src })
+  }
 }
 
-function onFileRemoved(name) {
-  selectedFiles.value = selectedFiles.value.filter((f) => f !== name)
+function onChipRemove(item) {
+  selectedFiles.value = selectedFiles.value.filter((s) => !(s.name === item.name && s.src === item.src))
+}
+
+function onFileRemoved(name, src = 'upload') {
+  selectedFiles.value = selectedFiles.value.filter((s) => !(s.name === name && s.src === src))
 }
 
 const hasFiles = computed(() => selectedFiles.value.length > 0)
@@ -65,7 +70,8 @@ function autoResize() {
 watch(question, () => nextTick(autoResize))
 
 async function doSend() {
-  const outputFile = await sendMessage(selectedFiles.value)
+  const files = selectedFiles.value.map((s) => `${s.src === 'output' ? 'download' : 'upload'}:${s.name}`)
+  const outputFile = await sendMessage(files)
   selectedFiles.value = []
   if (outputFile) await filePanel.value?.refreshAll()
 }
@@ -132,7 +138,7 @@ onMounted(() => {
         :selected-files="selectedFiles"
         :class="{ collapsed: leftCollapsed }"
         @notify="pushSystem"
-        @toggle-select="toggleSelect"
+        @select-output="addToWorkspace"
         @removed="onFileRemoved"
       />
 
@@ -142,7 +148,7 @@ onMounted(() => {
           <div v-if="!messages.length" class="empty-chat">
             <div class="empty-icon">💬</div>
             <p>{{ mode === 'ffprobe' ? '选择文件后，告诉我你想查看文件的哪些信息' : '选择文件后，告诉我你想对文件做什么' }}</p>
-            <p v-if="!hasFiles" class="empty-hint">在左侧面板勾选文件后，再输入需求</p>
+            <p v-if="!hasFiles" class="empty-hint">在左侧面板点击 ＋ 将文件加入工作区，再输入需求</p>
             <p class="examples">
               <button v-if="mode === 'ffprobe'" class="example-chip" @click="useExample('查看视频的分辨率和编码')">查看视频的分辨率和编码</button>
               <button v-if="mode === 'ffprobe'" class="example-chip" @click="useExample('查看音频采样率')">查看音频采样率</button>

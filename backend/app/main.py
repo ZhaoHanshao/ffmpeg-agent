@@ -146,12 +146,19 @@ async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder):
 
 
 def _sanitize_selected_files(files: list[str]) -> list[str]:
-    """清洗选中的文件名：仅保留 upload/ 中实际存在的 basename（防路径穿越）"""
+    """清洗选中的文件：支持 'upload:xxx' / 'download:xxx' 前缀（裸文件名默认 upload）。
+    仅保留对应目录中实际存在的 basename（防路径穿越），返回项目根目录下的相对路径。"""
     result = []
-    for f in files or []:
-        name = os.path.basename(f or '')
-        if name and os.path.isfile(os.path.join(UPLOAD_DIR, name)):
-            result.append(name)
+    for entry in files or []:
+        entry = (entry or '').strip()
+        src, _, name = entry.partition(':')
+        if src not in ('upload', 'download'):
+            src, name = 'upload', entry
+        name = os.path.basename(name)
+        base = DOWNLOAD_DIR if src == 'download' else UPLOAD_DIR
+        path = os.path.join(base, name)
+        if name and os.path.isfile(path) and path not in result:
+            result.append(path)
     return result
 
 

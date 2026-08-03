@@ -70,11 +70,7 @@ def get_files(config: RunnableConfig):
     os.makedirs(UPLOAD, exist_ok=True)
     selected = ((config or {}).get('configurable') or {}).get('selected_files') or []
     if selected:
-        files = [
-            os.path.join(UPLOAD, name)
-            for name in selected
-            if os.path.isfile(os.path.join(UPLOAD, name))
-        ]
+        files = list(dict.fromkeys(p for p in selected if os.path.isfile(p)))
     else:
         files = [os.path.join(UPLOAD, name) for name in os.listdir(UPLOAD)]
     return {
@@ -85,7 +81,7 @@ def get_files(config: RunnableConfig):
 
 
 @tool
-def execute_command(command: str):
+def execute_command(command: str, config: RunnableConfig):
     """
     执行ffmpeg命令
     参数值：
@@ -127,10 +123,12 @@ def execute_command(command: str):
     os.makedirs(DOWNLOAD, exist_ok=True)
 
     # 清空下载目录，防止 ffmpeg 阻塞在 Overwrite? [y/N] 提示
+    # 本次选中的输入文件（可能来自下载目录）需要保留，不能被清掉
+    protected = {os.path.normpath(p) for p in (((config or {}).get('configurable') or {}).get('selected_files') or [])}
     if os.path.exists(DOWNLOAD):
         for f in os.listdir(DOWNLOAD):
             fp = os.path.join(DOWNLOAD, f)
-            if os.path.isfile(fp):
+            if os.path.isfile(fp) and os.path.normpath(fp) not in protected:
                 os.remove(fp)
 
     try:

@@ -151,7 +151,7 @@ def build_chat_prompt(state: dict) -> str:
     if state.get('output_file'):
         prompt += f'\n输出文件：{state["output_file"]}'
     if state.get('files'):
-        prompt += f'\n选择处理的文件：{", ".join(state["files"])}'
+        prompt += f'\n选择处理的文件：{", ".join(os.path.basename(f) for f in state["files"])}'
     return prompt
 
 
@@ -264,7 +264,7 @@ def build_probe_chat_prompt(state: dict) -> str:
     if state.get('command_result'):
         prompt += f'\n命令执行结果：{state["command_result"]}'
     if state.get('files'):
-        prompt += f'\n选择处理的文件：{", ".join(state["files"])}'
+        prompt += f'\n选择处理的文件：{", ".join(os.path.basename(f) for f in state["files"])}'
     return prompt
 
 
