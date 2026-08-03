@@ -33,6 +33,13 @@ function onMsgClick(e) {
   <div class="msg-row" :class="msg.role">
     <div class="avatar">{{ msg.role === 'user' ? '👤' : msg.role === 'ai' ? '🤖' : '⚙️' }}</div>
     <div class="bubble">
+      <div v-if="msg.files?.length" class="msg-files">
+        <span v-for="f in msg.files" :key="`${f.src}-${f.name}`" class="msg-file-chip">
+          <span class="msg-file-icon">{{ f.src === 'output' ? '🎯' : '📄' }}</span>
+          <span class="msg-file-name">{{ f.name }}</span>
+          <span v-if="f.src === 'output'" class="msg-file-tag">输出</span>
+        </span>
+      </div>
       <div class="msg-text" v-html="rendered" @click="onMsgClick" />
       <div v-if="msg.outputFile" class="output-area">
         <img
@@ -157,6 +164,40 @@ function onMsgClick(e) {
 .msg-text :deep(hr) { border: none; border-top: 1px solid #e5e7eb; margin: 10px 0; }
 .user .msg-text :deep(code) { background: rgba(255, 255, 255, 0.2); }
 .user .msg-text :deep(a) { color: #c7d2fe; }
+
+.msg-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.msg-file-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  max-width: 100%;
+}
+.user .msg-file-chip { background: rgba(255, 255, 255, 0.18); border-color: rgba(255, 255, 255, 0.35); }
+.msg-file-icon { font-size: 12px; flex-shrink: 0; }
+.msg-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+.msg-file-tag {
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 16px;
+  flex-shrink: 0;
+}
 
 .output-area { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .preview-img {

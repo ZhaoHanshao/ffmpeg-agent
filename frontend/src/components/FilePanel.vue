@@ -2,7 +2,11 @@
 import { ref, computed, onMounted } from 'vue'
 import { api, API_BASE } from '../api'
 
-const emit = defineEmits(['notify'])
+const emit = defineEmits(['notify', 'select-output', 'removed'])
+
+const props = defineProps({
+  selectedFiles: { type: Array, default: () => [] },
+})
 
 const uploadedFiles = ref([])
 const outputFiles = ref([])
@@ -87,9 +91,18 @@ async function doUpload(files) {
   }
 }
 
+function addToWorkspace(filename, src) {
+  emit('select-output', filename, src)
+}
+
+function isSelected(src, name) {
+  return props.selectedFiles.some((s) => s.src === src && s.name === name)
+}
+
 async function deleteUploadedFile(filename) {
   try {
     await api.deleteUpload(filename)
+    emit('removed', filename, 'upload')
     await refreshUploadedFiles()
   } catch (e) {
     emit('notify', `删除失败: ${e.message}`)
@@ -99,6 +112,7 @@ async function deleteUploadedFile(filename) {
 async function deleteOutputFile(filename) {
   try {
     await api.deleteOutput(filename)
+    emit('removed', filename, 'output')
     const s = new Set(selectedOutput.value)
     s.delete(filename)
     selectedOutput.value = s
@@ -144,7 +158,7 @@ async function downloadSelectedOutput() {
   }
 }
 
-defineExpose({ refreshAll })
+defineExpose({ refreshAll, refreshOutputFiles, triggerUpload })
 
 onMounted(refreshAll)
 </script>
@@ -185,10 +199,21 @@ onMounted(refreshAll)
         <div v-if="loadingUpload" class="file-status"><span class="mini-spinner" /> 加载中…</div>
         <div v-else-if="!uploadedFiles.length" class="file-status empty"><span>暂无上传文件</span></div>
         <div v-else class="file-list">
-          <div v-for="f in uploadedFiles" :key="f" class="file-row">
+          <div
+            v-for="f in uploadedFiles"
+            :key="f"
+            class="file-row"
+            :class="{ selected: isSelected('upload', f) }"
+          >
             <span class="file-icon">📄</span>
             <span class="file-name" :title="f">{{ f }}</span>
             <div class="file-actions">
+              <button
+                class="file-btn add"
+                :class="{ active: isSelected('upload', f) }"
+                title="加入工作区"
+                @click="addToWorkspace(f, 'upload')"
+              >＋</button>
               <a
                 :href="`${API_BASE}/upload/${encodeURIComponent(f)}`"
                 class="file-btn download"
@@ -229,6 +254,12 @@ onMounted(refreshAll)
             <span class="file-icon">🎯</span>
             <span class="file-name" :title="f">{{ f }}</span>
             <div class="file-actions">
+              <button
+                class="file-btn add"
+                :class="{ active: isSelected('output', f) }"
+                title="加入工作区"
+                @click.stop="addToWorkspace(f, 'output')"
+              >＋</button>
               <a
                 :href="`${API_BASE}/output/${encodeURIComponent(f)}`"
                 class="file-btn download"
@@ -408,6 +439,8 @@ onMounted(refreshAll)
   height: 28px;
 }
 .file-btn:hover { background: #e5e7eb; text-decoration: none; }
+.file-btn.add:hover { background: #eef1ff; }
+.file-btn.add.active { background: #eef1ff; color: #4f6ef7; font-weight: 700; }
 .file-btn.delete:hover { background: #fee2e2; }
 
 .file-checkbox {

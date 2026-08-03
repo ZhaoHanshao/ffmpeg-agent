@@ -1,9 +1,10 @@
 <script setup>
-import { ref, onMounted, watch, nextTick } from 'vue'
+import { ref, onMounted, watch, nextTick, computed } from 'vue'
 import { useChat } from './composables/useChat'
 import { useSettings } from './composables/useSettings'
 import MessageItem from './components/MessageItem.vue'
 import FilePanel from './components/FilePanel.vue'
+import SelectedFilesBar from './components/SelectedFilesBar.vue'
 import SettingsModal from './components/SettingsModal.vue'
 
 // ── 模式：ffmpeg 处理 / ffprobe 分析 ──
@@ -34,6 +35,26 @@ const {
 const textareaRef = ref(null)
 const filePanel = ref(null)
 
+// ── 选中的待处理文件（仅本地选择态，不移除服务器文件） ──
+// 元素：{ name: 文件名, src: 'upload' | 'output' }
+const selectedFiles = ref([])
+
+function addToWorkspace(name, src) {
+  if (!selectedFiles.value.some((s) => s.src === src && s.name === name)) {
+    selectedFiles.value.push({ name, src })
+  }
+}
+
+function onChipRemove(item) {
+  selectedFiles.value = selectedFiles.value.filter((s) => !(s.name === item.name && s.src === item.src))
+}
+
+function onFileRemoved(name, src = 'upload') {
+  selectedFiles.value = selectedFiles.value.filter((s) => !(s.name === name && s.src === src))
+}
+
+const hasFiles = computed(() => selectedFiles.value.length > 0)
+
 function pushSystem(text) {
   messages.value.push({ role: 'system', text })
 }
@@ -48,22 +69,28 @@ function autoResize() {
 // 发送后 question 被清空（不触发 input 事件），watch 确保高度复位
 watch(question, () => nextTick(autoResize))
 
+async function doSend() {
+  const files = selectedFiles.value.map((s) => ({ ...s }))
+  selectedFiles.value = []
+  await sendMessage(files)
+  await filePanel.value?.refreshOutputFiles()
+}
+
 function onKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
-    sendMessage()
+    doSend()
   }
 }
 
 function useExample(text) {
   question.value = text
   autoResize()
-  sendMessage()
+  doSend()
 }
 
 async function onSend() {
-  const outputFile = await sendMessage()
-  if (outputFile) await filePanel.value?.refreshAll()
+  await doSend()
 }
 
 onMounted(() => {
@@ -106,14 +133,22 @@ onMounted(() => {
 
     <!-- ── 双栏主体 ── -->
     <div class="body">
-      <FilePanel ref="filePanel" :class="{ collapsed: leftCollapsed }" @notify="pushSystem" />
+      <FilePanel
+        ref="filePanel"
+        :selected-files="selectedFiles"
+        :class="{ collapsed: leftCollapsed }"
+        @notify="pushSystem"
+        @select-output="addToWorkspace"
+        @removed="onFileRemoved"
+      />
 
       <!-- ===== 右栏：对话界面 ===== -->
       <main class="right-panel">
         <div ref="chatContainer" class="chat-messages" @scroll="onChatScroll">
           <div v-if="!messages.length" class="empty-chat">
             <div class="empty-icon">💬</div>
-            <p>{{ mode === 'ffprobe' ? '上传文件后，告诉我你想查看文件的哪些信息' : '上传文件后，告诉我你想对文件做什么' }}</p>
+            <p>{{ mode === 'ffprobe' ? '选择文件后，告诉我你想查看文件的哪些信息' : '选择文件后，告诉我你想对文件做什么' }}</p>
+            <p v-if="!hasFiles" class="empty-hint">在左侧面板点击 ＋ 将文件加入工作区，再输入需求</p>
             <p class="examples">
               <button v-if="mode === 'ffprobe'" class="example-chip" @click="useExample('查看视频的分辨率和编码')">查看视频的分辨率和编码</button>
               <button v-if="mode === 'ffprobe'" class="example-chip" @click="useExample('查看音频采样率')">查看音频采样率</button>
@@ -126,7 +161,13 @@ onMounted(() => {
           <MessageItem v-for="(msg, i) in messages" :key="i" :msg="msg" />
         </div>
 
-        <!-- ── 输入栏 ── -->
+        <!-- ── 选中文件栏 + 输入栏 ── -->
+        <SelectedFilesBar
+          v-if="hasFiles"
+          :files="selectedFiles"
+          @remove="onChipRemove"
+          @add="filePanel?.triggerUpload()"
+        />
         <footer class="input-bar">
           <textarea
             ref="textareaRef"
@@ -264,6 +305,7 @@ a:hover { text-decoration: underline; }
 }
 .empty-icon { font-size: 48px; margin-bottom: 8px; }
 .empty-chat p { font-size: 14px; }
+.empty-hint { font-size: 12px !important; color: #b8bfcc; }
 .examples {
   display: flex;
   flex-wrap: wrap;
