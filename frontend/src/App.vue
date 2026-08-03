@@ -70,9 +70,9 @@ function autoResize() {
 watch(question, () => nextTick(autoResize))
 
 async function doSend() {
-  const files = selectedFiles.value.map((s) => `${s.src === 'output' ? 'download' : 'upload'}:${s.name}`)
-  const outputFile = await sendMessage(files)
+  const files = selectedFiles.value.map((s) => ({ ...s }))
   selectedFiles.value = []
+  const outputFile = await sendMessage(files)
   if (outputFile) await filePanel.value?.refreshAll()
 }
 

@@ -48,7 +48,7 @@ export function useChat(mode) {
     const text = question.value.trim()
     if (!text || sending.value) return ''
 
-    messages.value.push({ role: 'user', text })
+    messages.value.push({ role: 'user', text, files })
     question.value = ''
     const reply = reactive({ role: 'ai', text: '', outputFile: '' })
     messages.value.push(reply)
@@ -64,7 +64,7 @@ export function useChat(mode) {
     try {
       const form = new FormData()
       form.append('question', text)
-      for (const f of files) form.append('files', f)
+      for (const f of files) form.append('files', `${f.src === 'output' ? 'download' : 'upload'}:${f.name}`)
       const res = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         body: form,
