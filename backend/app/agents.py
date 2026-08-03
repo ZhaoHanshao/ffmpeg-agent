@@ -32,10 +32,12 @@ _execute_prompt = (
     '3. 输入文件路径用 get_files 返回的实际路径\n'
     '4. 只处理 get_files 返回的文件，不要处理其他文件\n'
     '5. 输出文件只写文件名（如 output.webp），工具会自动重定向到输出目录\n'
-    '6. 一个任务只执行一次 ffmpeg，不要重复尝试多种参数\n'
-    '7. 如果 ffmpeg 成功（返回 flag=true），立即结束，不要继续尝试其他命令\n'
-    '8. 不要执行 convert、dwebp、apt-get、sudo、pip、python、ls、pwd、find、which 等非 ffmpeg 命令\n'
-    '9. 如果 ffmpeg 执行失败，不要重试，直接返回失败原因。'
+    '6. 输出文件命名：如果用户没有明确指定输出文件名，默认命名为"原文件名去掉扩展名 + _output + 目标扩展名"'
+    '（如 demo.mp4 → demo_output.mp4；格式转换时使用目标格式的扩展名，如 demo.webm 转 mp4 → demo_output.mp4）\n'
+    '7. 一个任务只执行一次 ffmpeg，不要重复尝试多种参数\n'
+    '8. 如果 ffmpeg 成功（返回 flag=true），立即结束，不要继续尝试其他命令\n'
+    '9. 不要执行 convert、dwebp、apt-get、sudo、pip、python、ls、pwd、find、which 等非 ffmpeg 命令\n'
+    '10. 如果 ffmpeg 执行失败，不要重试，直接返回失败原因。'
 )
 
 _chat_prompt = (
