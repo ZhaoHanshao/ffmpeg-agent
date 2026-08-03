@@ -20,6 +20,7 @@ class state(MessagesState):
     search_count: int = 0
     execute_count: int = 0
     progress: list = None
+    files: list = None
 
 
 def search(state: state):
@@ -68,7 +69,10 @@ def execute(state: state):
         f'用户问题：{user_question}\n\n'
         f'知识库检索结果：{state["result"]}'
     )
-    res = agent_execute.invoke({'messages': [HumanMessage(content=execute_prompt)]})
+    res = agent_execute.invoke(
+        {'messages': [HumanMessage(content=execute_prompt)]},
+        config={'configurable': {'selected_files': state.get('files') or []}},
+    )
     for msg in reversed(res['messages']):
         if isinstance(msg, ToolMessage):
             try:
@@ -114,7 +118,7 @@ exec_workflow.add_conditional_edges(
 )
 
 
-def exec_graph(question: str, progress: list = None) -> dict:
+def exec_graph(question: str, progress: list = None, files: list = None) -> dict:
     logger.info(f'开始执行，用户问题：{question}')
     compiled = exec_workflow.compile()
     result = compiled.invoke({
@@ -128,6 +132,7 @@ def exec_graph(question: str, progress: list = None) -> dict:
         "search_count": 0,
         "execute_count": 0,
         "progress": progress,
+        "files": files or [],
     })
     return result
 
@@ -145,6 +150,8 @@ def build_chat_prompt(state: dict) -> str:
         prompt += f'\n命令执行结果：{state["command_result"]}'
     if state.get('output_file'):
         prompt += f'\n输出文件：{state["output_file"]}'
+    if state.get('files'):
+        prompt += f'\n选择处理的文件：{", ".join(state["files"])}'
     return prompt
 
 
@@ -196,7 +203,10 @@ def probe_execute(state: state):
         f'用户问题：{user_question}\n\n'
         f'知识库检索结果：{state["result"]}'
     )
-    res = agent_probe_execute.invoke({'messages': [HumanMessage(content=execute_prompt)]})
+    res = agent_probe_execute.invoke(
+        {'messages': [HumanMessage(content=execute_prompt)]},
+        config={'configurable': {'selected_files': state.get('files') or []}},
+    )
     for msg in reversed(res['messages']):
         if isinstance(msg, ToolMessage):
             try:
@@ -223,7 +233,7 @@ probe_exec_workflow.add_conditional_edges(
 )
 
 
-def probe_exec_graph(question: str, progress: list = None) -> dict:
+def probe_exec_graph(question: str, progress: list = None, files: list = None) -> dict:
     logger.info(f'开始执行 ffprobe 任务，用户问题：{question}')
     compiled = probe_exec_workflow.compile()
     result = compiled.invoke({
@@ -237,6 +247,7 @@ def probe_exec_graph(question: str, progress: list = None) -> dict:
         "search_count": 0,
         "execute_count": 0,
         "progress": progress,
+        "files": files or [],
     })
     return result
 
@@ -252,6 +263,8 @@ def build_probe_chat_prompt(state: dict) -> str:
         prompt += f'\n执行的命令：{state["command"]}'
     if state.get('command_result'):
         prompt += f'\n命令执行结果：{state["command_result"]}'
+    if state.get('files'):
+        prompt += f'\n选择处理的文件：{", ".join(state["files"])}'
     return prompt
 
 

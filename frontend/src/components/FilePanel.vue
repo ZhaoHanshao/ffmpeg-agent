@@ -2,7 +2,11 @@
 import { ref, computed, onMounted } from 'vue'
 import { api, API_BASE } from '../api'
 
-const emit = defineEmits(['notify'])
+const emit = defineEmits(['notify', 'toggle-select', 'uploaded', 'removed'])
+
+const props = defineProps({
+  selectedFiles: { type: Array, default: () => [] },
+})
 
 const uploadedFiles = ref([])
 const outputFiles = ref([])
@@ -78,8 +82,10 @@ function onDrop(e) {
 async function doUpload(files) {
   uploading.value = true
   try {
-    await api.upload(files)
+    const res = await api.upload(files)
+    const saved = (await res.json().catch(() => ({}))).uploaded || []
     await refreshUploadedFiles()
+    if (saved.length) emit('uploaded', saved)
   } catch (e) {
     emit('notify', `上传失败: ${e.message}`)
   } finally {
@@ -87,9 +93,14 @@ async function doUpload(files) {
   }
 }
 
+function toggleSelect(filename) {
+  emit('toggle-select', filename)
+}
+
 async function deleteUploadedFile(filename) {
   try {
     await api.deleteUpload(filename)
+    emit('removed', filename)
     await refreshUploadedFiles()
   } catch (e) {
     emit('notify', `删除失败: ${e.message}`)
@@ -144,7 +155,7 @@ async function downloadSelectedOutput() {
   }
 }
 
-defineExpose({ refreshAll })
+defineExpose({ refreshAll, triggerUpload })
 
 onMounted(refreshAll)
 </script>
@@ -185,7 +196,19 @@ onMounted(refreshAll)
         <div v-if="loadingUpload" class="file-status"><span class="mini-spinner" /> 加载中…</div>
         <div v-else-if="!uploadedFiles.length" class="file-status empty"><span>暂无上传文件</span></div>
         <div v-else class="file-list">
-          <div v-for="f in uploadedFiles" :key="f" class="file-row">
+          <div
+            v-for="f in uploadedFiles"
+            :key="f"
+            class="file-row"
+            :class="{ selected: props.selectedFiles.includes(f) }"
+            @click="toggleSelect(f)"
+          >
+            <span
+              class="file-checkbox"
+              :class="{ checked: props.selectedFiles.includes(f) }"
+              title="选择/取消选择"
+              @click.stop="toggleSelect(f)"
+            />
             <span class="file-icon">📄</span>
             <span class="file-name" :title="f">{{ f }}</span>
             <div class="file-actions">
@@ -194,8 +217,9 @@ onMounted(refreshAll)
                 class="file-btn download"
                 title="下载"
                 download
+                @click.stop
               >⬇</a>
-              <button class="file-btn delete" title="删除" @click="deleteUploadedFile(f)">🗑</button>
+              <button class="file-btn delete" title="删除" @click.stop="deleteUploadedFile(f)">🗑</button>
             </div>
           </div>
         </div>

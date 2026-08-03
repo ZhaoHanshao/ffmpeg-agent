@@ -60,17 +60,23 @@ def get_probe_command(squry: str):
 @tool
 def get_files(config: RunnableConfig):
     """
-    全部读取
     获取将要执行ffmpeg命令的文件
     文件数量为一个或者多个，返回结果是一个列表
     返回结果：第一个为要处理的文件，即在ffmpeg命令中 -i 后跟着的input
               第二个为处理后的文件存放的地址
+    只返回用户选中的文件；未指定选中文件时返回全部
     """
     logger.info('获取文件列表')
     os.makedirs(UPLOAD, exist_ok=True)
-    files = os.listdir(UPLOAD)
-    for i, file in enumerate(files, 0):
-        files[i] = os.path.join(UPLOAD, file)
+    selected = ((config or {}).get('configurable') or {}).get('selected_files') or []
+    if selected:
+        files = [
+            os.path.join(UPLOAD, name)
+            for name in selected
+            if os.path.isfile(os.path.join(UPLOAD, name))
+        ]
+    else:
+        files = [os.path.join(UPLOAD, name) for name in os.listdir(UPLOAD)]
     return {
         "需要处理": files,
         "输入目录": UPLOAD,

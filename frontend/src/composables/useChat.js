@@ -44,7 +44,7 @@ export function useChat(mode) {
     autoScroll.value = true
   }
 
-  async function sendMessage() {
+  async function sendMessage(files = []) {
     const text = question.value.trim()
     if (!text || sending.value) return ''
 
@@ -64,6 +64,7 @@ export function useChat(mode) {
     try {
       const form = new FormData()
       form.append('question', text)
+      for (const f of files) form.append('files', f)
       const res = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         body: form,

@@ -30,11 +30,12 @@ _execute_prompt = (
     '1. 只能调用 execute_command 执行以 ffmpeg 开头的命令\n'
     '2. 先用 get_files 查看可用的输入文件\n'
     '3. 输入文件路径用 get_files 返回的实际路径\n'
-    '4. 输出文件只写文件名（如 output.webp），工具会自动重定向到输出目录\n'
-    '5. 一个任务只执行一次 ffmpeg，不要重复尝试多种参数\n'
-    '6. 如果 ffmpeg 成功（返回 flag=true），立即结束，不要继续尝试其他命令\n'
-    '7. 不要执行 convert、dwebp、apt-get、sudo、pip、python、ls、pwd、find、which 等非 ffmpeg 命令\n'
-    '8. 如果 ffmpeg 执行失败，不要重试，直接返回失败原因。'
+    '4. 只处理 get_files 返回的文件，不要处理其他文件\n'
+    '5. 输出文件只写文件名（如 output.webp），工具会自动重定向到输出目录\n'
+    '6. 一个任务只执行一次 ffmpeg，不要重复尝试多种参数\n'
+    '7. 如果 ffmpeg 成功（返回 flag=true），立即结束，不要继续尝试其他命令\n'
+    '8. 不要执行 convert、dwebp、apt-get、sudo、pip、python、ls、pwd、find、which 等非 ffmpeg 命令\n'
+    '9. 如果 ffmpeg 执行失败，不要重试，直接返回失败原因。'
 )
 
 _chat_prompt = (
@@ -101,12 +102,13 @@ _probe_execute_prompt = (
     '1. 只能调用 execute_probe_command 执行以 ffprobe 开头的命令\n'
     '2. 先用 get_files 查看可用的输入文件\n'
     '3. 输入文件路径用 get_files 返回的实际路径\n'
-    '4. ffprobe 是只读分析工具，输出打印到终端即可，不要添加输出文件参数\n'
-    '5. 查看媒体信息时使用 -show_format、-show_streams、-show_packets 等参数，常用组合：ffprobe -v error -show_format -show_streams\n'
-    '6. 一个任务只执行一次 ffprobe，不要重复尝试多种参数\n'
-    '7. 如果 ffprobe 成功（返回 flag=true），立即结束，不要继续尝试其他命令\n'
-    '8. 不要执行 ffmpeg、convert、apt-get、sudo、pip、python、ls、pwd、find、which 等非 ffprobe 命令\n'
-    '9. 如果 ffprobe 执行失败，不要重试，直接返回失败原因。'
+    '4. 只处理 get_files 返回的文件，不要处理其他文件\n'
+    '5. ffprobe 是只读分析工具，输出打印到终端即可，不要添加输出文件参数\n'
+    '6. 查看媒体信息时使用 -show_format、-show_streams、-show_packets 等参数，常用组合：ffprobe -v error -show_format -show_streams\n'
+    '7. 一个任务只执行一次 ffprobe，不要重复尝试多种参数\n'
+    '8. 如果 ffprobe 成功（返回 flag=true），立即结束，不要继续尝试其他命令\n'
+    '9. 不要执行 ffmpeg、convert、apt-get、sudo、pip、python、ls、pwd、find、which 等非 ffprobe 命令\n'
+    '10. 如果 ffprobe 执行失败，不要重试，直接返回失败原因。'
 )
 
 _probe_chat_prompt = (

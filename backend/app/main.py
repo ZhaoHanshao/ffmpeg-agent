@@ -145,8 +145,18 @@ async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder):
         logger.info(f'输出文件：{output_file}')
 
 
+def _sanitize_selected_files(files: list[str]) -> list[str]:
+    """清洗选中的文件名：仅保留 upload/ 中实际存在的 basename（防路径穿越）"""
+    result = []
+    for f in files or []:
+        name = os.path.basename(f or '')
+        if name and os.path.isfile(os.path.join(UPLOAD_DIR, name)):
+            result.append(name)
+    return result
+
+
 @app.post("/api/chat")
-async def chat(question: str = Form(...)):
+async def chat(question: str = Form(...), files: list[str] = Form(default=[])):
     """发送问题 → 流式输出（ffmpeg search+execute 进度 + chat 逐 token）"""
     if not ensure_agents():
         return Response(
@@ -154,19 +164,27 @@ async def chat(question: str = Form(...)):
             media_type="text/event-stream",
         )
 
+    selected = _sanitize_selected_files(files)
+    if not selected:
+        return Response(
+            content=f"data: {json.dumps({'event': 'error', 'text': '请先选择要处理的文件，再发起需求'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
+            media_type="text/event-stream",
+        )
+
     logger.info('处理对话')
     logger.info(f'用户问题：{question[:200]}')
+    logger.info(f'选择文件：{selected}')
 
     from app.agents import agent_chat
 
     return StreamingResponse(
-        _event_stream(question, exec_graph, agent_chat, build_chat_prompt),
+        _event_stream(question, lambda q, p: exec_graph(q, p, files=selected), agent_chat, build_chat_prompt),
         media_type="text/event-stream",
     )
 
 
 @app.post("/api/probe/chat")
-async def probe_chat(question: str = Form(...)):
+async def probe_chat(question: str = Form(...), files: list[str] = Form(default=[])):
     """发送问题 → 流式输出（ffprobe search+execute 进度 + chat 逐 token）"""
     if not ensure_probe_agents():
         return Response(
@@ -174,13 +192,21 @@ async def probe_chat(question: str = Form(...)):
             media_type="text/event-stream",
         )
 
+    selected = _sanitize_selected_files(files)
+    if not selected:
+        return Response(
+            content=f"data: {json.dumps({'event': 'error', 'text': '请先选择要处理的文件，再发起需求'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
+            media_type="text/event-stream",
+        )
+
     logger.info('处理 ffprobe 对话')
     logger.info(f'用户问题：{question[:200]}')
+    logger.info(f'选择文件：{selected}')
 
     from app.agents import agent_probe_chat
 
     return StreamingResponse(
-        _event_stream(question, probe_exec_graph, agent_probe_chat, build_probe_chat_prompt),
+        _event_stream(question, lambda q, p: probe_exec_graph(q, p, files=selected), agent_probe_chat, build_probe_chat_prompt),
         media_type="text/event-stream",
     )
 
