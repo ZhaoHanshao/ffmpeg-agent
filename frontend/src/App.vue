@@ -165,7 +165,7 @@ onMounted(() => {
         <SelectedFilesBar
           v-if="hasFiles"
           :files="selectedFiles"
-          @remove="toggleSelect"
+          @remove="onChipRemove"
           @add="filePanel?.triggerUpload()"
         />
         <footer class="input-bar">
