@@ -51,7 +51,7 @@
 - Python 3.10+
 - Node.js 18+
 - FFmpeg（已安装并在 PATH 中可用）
-- 一个 OpenAI 兼容的大模型密钥（如 OpenAI、DeepSeek 等）
+- 一个 OpenAI 兼容的大模型密钥（如 OpenAI、DeepSeek 等，在页面中填写，无需配置文件）
 
 ### 2. 安装后端
 
@@ -69,32 +69,7 @@ pip install -r requirements.txt
 # Ubuntu: sudo apt install ffmpeg
 ```
 
-### 3. 配置环境变量
-
-复制 `.env.example` 为 `.env`，填写你的配置：
-
-```ini
-# 大模型配置（OpenAI 兼容接口）
-MODEL_NAME="gpt-4o-mini"
-API_KEY="你的OpenAI API密钥"
-BASE_URL="https://api.openai.com/v1"
-
-# 文件目录（通常无需修改）
-UPLOAD = "backend/upload"
-DOWNLOAD = "backend/download"
-
-# 向量数据库（通常无需修改）
-DB_DIR = 'backend/data/chroma_db'
-COLLECTION_NAME = "ffmpeg_docs"
-
-# 模型下载（首次启动时自动下载）
-DOC_URL = "https://ffmpeg.org/ffmpeg-all.html"
-BGE_MODEL_NAME = "BAAI/bge-small-zh-v1.5"
-BGE_CACHE_DIR = "backend/data/bge_small"
-# HF_ENDPOINT = "https://hf-mirror.com"   # 国内 HuggingFace 镜像（如需要）
-```
-
-### 4. 启动后端
+### 3. 启动后端
 
 ```shell
 python backend/app/main.py
@@ -107,7 +82,7 @@ python backend/app/main.py
 
 后端运行在 `http://localhost:8000`
 
-### 5. 安装并启动前端
+### 4. 安装并启动前端
 
 ```shell
 cd frontend
@@ -117,11 +92,18 @@ npm run dev
 
 前端运行在 `http://localhost:5173`，会自动代理 API 请求到后端。
 
-### 6. 打开浏览器访问
+### 5. 打开浏览器访问并配置模型
 
 ```
 http://localhost:5173
 ```
+
+首次打开页面会自动弹出 **LLM 设置**窗口，填写你的模型信息：
+- **模型名称**（如 `gpt-4o-mini`、`glm-4.6v`）
+- **API 密钥**
+- **接口地址**（OpenAI 兼容的 BASE_URL）
+
+保存后即可开始使用，无需修改任何配置文件；之后也可以随时点击右上角 **⚙️** 重新设置。
 
 ---
 
@@ -175,7 +157,7 @@ http://localhost:5173
 ## 常见问题
 
 **Q：支持哪些大模型？**
-任何兼容 OpenAI API 的模型都可以，在 `.env` 中配置 `BASE_URL` 和 `API_KEY` 即可。例如 OpenAI、DeepSeek、智谱 AI、通义千问等。
+任何兼容 OpenAI API 的模型都可以，点击页面右上角 **⚙️** 填写 `BASE_URL`、`API_KEY` 和模型名称即可，无需修改配置文件。例如 OpenAI、DeepSeek、智谱 AI、通义千问等。
 
 **Q：知识库里有什么内容？**
 知识库存放的是 FFmpeg 官方文档（`ffmpeg-all.html`）的中英文片段。首次启动时自动从官网下载并构建向量库。
