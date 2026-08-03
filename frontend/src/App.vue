@@ -72,8 +72,8 @@ watch(question, () => nextTick(autoResize))
 async function doSend() {
   const files = selectedFiles.value.map((s) => ({ ...s }))
   selectedFiles.value = []
-  const outputFile = await sendMessage(files)
-  if (outputFile) await filePanel.value?.refreshAll()
+  await sendMessage(files)
+  await filePanel.value?.refreshOutputFiles()
 }
 
 function onKeydown(e) {

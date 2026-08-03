@@ -158,7 +158,7 @@ async function downloadSelectedOutput() {
   }
 }
 
-defineExpose({ refreshAll, triggerUpload })
+defineExpose({ refreshAll, refreshOutputFiles, triggerUpload })
 
 onMounted(refreshAll)
 </script>
