@@ -21,5 +21,16 @@ export function sanitizeHtml(html) {
       }
     }
   }
+  for (const pre of doc.querySelectorAll('pre')) {
+    const wrap = doc.createElement('div')
+    wrap.className = 'code-block'
+    const btn = doc.createElement('button')
+    btn.className = 'code-copy'
+    btn.type = 'button'
+    btn.textContent = '⧉ 复制'
+    pre.parentNode.insertBefore(wrap, pre)
+    wrap.appendChild(btn)
+    wrap.appendChild(pre)
+  }
   return doc.body.innerHTML
 }

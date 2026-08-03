@@ -60,17 +60,19 @@ def get_probe_command(squry: str):
 @tool
 def get_files(config: RunnableConfig):
     """
-    全部读取
     获取将要执行ffmpeg命令的文件
     文件数量为一个或者多个，返回结果是一个列表
     返回结果：第一个为要处理的文件，即在ffmpeg命令中 -i 后跟着的input
               第二个为处理后的文件存放的地址
+    只返回用户选中的文件；未指定选中文件时返回全部
     """
     logger.info('获取文件列表')
     os.makedirs(UPLOAD, exist_ok=True)
-    files = os.listdir(UPLOAD)
-    for i, file in enumerate(files, 0):
-        files[i] = os.path.join(UPLOAD, file)
+    selected = ((config or {}).get('configurable') or {}).get('selected_files') or []
+    if selected:
+        files = list(dict.fromkeys(p for p in selected if os.path.isfile(p)))
+    else:
+        files = [os.path.join(UPLOAD, name) for name in os.listdir(UPLOAD)]
     return {
         "需要处理": files,
         "输入目录": UPLOAD,
@@ -79,7 +81,7 @@ def get_files(config: RunnableConfig):
 
 
 @tool
-def execute_command(command: str):
+def execute_command(command: str, config: RunnableConfig):
     """
     执行ffmpeg命令
     参数值：
@@ -121,10 +123,12 @@ def execute_command(command: str):
     os.makedirs(DOWNLOAD, exist_ok=True)
 
     # 清空下载目录，防止 ffmpeg 阻塞在 Overwrite? [y/N] 提示
+    # 本次选中的输入文件（可能来自下载目录）需要保留，不能被清掉
+    protected = {os.path.normpath(p) for p in (((config or {}).get('configurable') or {}).get('selected_files') or [])}
     if os.path.exists(DOWNLOAD):
         for f in os.listdir(DOWNLOAD):
             fp = os.path.join(DOWNLOAD, f)
-            if os.path.isfile(fp):
+            if os.path.isfile(fp) and os.path.normpath(fp) not in protected:
                 os.remove(fp)
 
     try:
