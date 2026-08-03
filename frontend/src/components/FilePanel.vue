@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { api, API_BASE } from '../api'
 
-const emit = defineEmits(['notify', 'toggle-select', 'uploaded', 'removed'])
+const emit = defineEmits(['notify', 'toggle-select', 'removed'])
 
 const props = defineProps({
   selectedFiles: { type: Array, default: () => [] },
@@ -82,10 +82,8 @@ function onDrop(e) {
 async function doUpload(files) {
   uploading.value = true
   try {
-    const res = await api.upload(files)
-    const saved = (await res.json().catch(() => ({}))).uploaded || []
+    await api.upload(files)
     await refreshUploadedFiles()
-    if (saved.length) emit('uploaded', saved)
   } catch (e) {
     emit('notify', `上传失败: ${e.message}`)
   } finally {

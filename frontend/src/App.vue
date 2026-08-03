@@ -44,12 +44,6 @@ function toggleSelect(name) {
     : [...selectedFiles.value, name]
 }
 
-function onUploaded(saved) {
-  for (const name of saved) {
-    if (!selectedFiles.value.includes(name)) selectedFiles.value.push(name)
-  }
-}
-
 function onFileRemoved(name) {
   selectedFiles.value = selectedFiles.value.filter((f) => f !== name)
 }
@@ -70,23 +64,27 @@ function autoResize() {
 // 发送后 question 被清空（不触发 input 事件），watch 确保高度复位
 watch(question, () => nextTick(autoResize))
 
+async function doSend() {
+  const outputFile = await sendMessage(selectedFiles.value)
+  selectedFiles.value = []
+  if (outputFile) await filePanel.value?.refreshAll()
+}
+
 function onKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
-    sendMessage()
+    doSend()
   }
 }
 
 function useExample(text) {
   question.value = text
   autoResize()
-  sendMessage()
+  doSend()
 }
 
 async function onSend() {
-  const outputFile = await sendMessage(selectedFiles.value)
-  selectedFiles.value = []
-  if (outputFile) await filePanel.value?.refreshAll()
+  await doSend()
 }
 
 onMounted(() => {
@@ -135,7 +133,6 @@ onMounted(() => {
         :class="{ collapsed: leftCollapsed }"
         @notify="pushSystem"
         @toggle-select="toggleSelect"
-        @uploaded="onUploaded"
         @removed="onFileRemoved"
       />
 
@@ -145,7 +142,7 @@ onMounted(() => {
           <div v-if="!messages.length" class="empty-chat">
             <div class="empty-icon">💬</div>
             <p>{{ mode === 'ffprobe' ? '选择文件后，告诉我你想查看文件的哪些信息' : '选择文件后，告诉我你想对文件做什么' }}</p>
-            <p v-if="!hasFiles" class="empty-hint">在左侧面板勾选文件，或点击输入框上方的 ＋ 上传并选择文件</p>
+            <p v-if="!hasFiles" class="empty-hint">在左侧面板勾选文件后，再输入需求</p>
             <p class="examples">
               <button v-if="mode === 'ffprobe'" class="example-chip" @click="useExample('查看视频的分辨率和编码')">查看视频的分辨率和编码</button>
               <button v-if="mode === 'ffprobe'" class="example-chip" @click="useExample('查看音频采样率')">查看音频采样率</button>
