@@ -1,0 +1,22 @@
+# ffmpeg-agent 一键部署
+# 用法：
+#   docker compose up -d --build
+#
+# 依赖根目录 .env（MODEL_NAME / API_KEY / BASE_URL，见 AGENTS.md）。
+# 若没有 .env（或字段不全），容器也能启动，可在前端设置弹窗填写 LLM 配置。
+#
+# 卷映射使上传/下载文件持久化（容器删除后数据仍在）。
+services:
+  ffmpeg-agent:
+    build: .
+    image: ffmpeg-agent:latest
+    container_name: ffmpeg-agent
+    ports:
+      - "8080:8000"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./backend/upload:/app/backend/upload
+      - ./backend/download:/app/backend/download
+    restart: unless-stopped

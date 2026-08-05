@@ -1,17 +1,21 @@
 # ============================================================
 # Stage 1: Build frontend (Vue + Vite)
 # ============================================================
-FROM node:18-alpine AS frontend-builder
+FROM node:20-alpine AS frontend-builder
 WORKDIR /build
 COPY frontend/package*.json ./
-RUN npm ci
+RUN npm ci --no-audit --no-fund
 COPY frontend/ .
 RUN npm run build
 
 # ============================================================
 # Stage 2: Production image
 # ============================================================
-FROM python:3.10-slim
+FROM python:3.12-slim
+
+# ── No .pyc files; flush logs immediately so `docker logs` is live ──
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 # ── Optional proxy args (pass --build-arg if behind a firewall) ──
 ARG HTTP_PROXY=""
@@ -68,8 +72,18 @@ ENV DB_DIR=backend/data/chroma_db \
     BGE_CACHE_DIR=backend/data/bge_small \
     DOC_URL=https://ffmpeg.org/ffmpeg-all.html
 
-RUN mkdir -p backend/upload backend/download
+# ── Non-root user (security hardening) ──
+RUN mkdir -p backend/upload backend/download backend/data \
+    && groupadd -r app \
+    && useradd -r -g app -d /app app \
+    && chown -R app:app /app
+USER app
 
 EXPOSE 8000
+
+# Startup is slow (~40-80s: imports + BGE model + first-run ChromaDB build),
+# hence the long start-period
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
 
 CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

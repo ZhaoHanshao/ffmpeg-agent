@@ -342,6 +342,11 @@ async def update_llm_settings(body: dict):
     return _settings_store
 
 
+@app.get("/api/health")
+async def health():
+    return {"status": "ok"}
+
+
 app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
 
 if __name__ == '__main__':
