@@ -15,6 +15,8 @@ const leftCollapsed = ref(false)
 // ── 初始化状态（首次运行后台下载模型、构建知识库） ──
 const initStatus = ref('ok')
 const initError = ref('')
+const initProgress = ref(0)
+const initStep = ref('')
 let healthTimer = null
 
 function pollHealth() {
@@ -23,6 +25,8 @@ function pollHealth() {
     .then((h) => {
       initStatus.value = h.status || 'ok'
       initError.value = h.error || ''
+      initProgress.value = h.progress || 0
+      initStep.value = h.step || ''
       if (initStatus.value === 'ok') {
         clearInterval(healthTimer)
         healthTimer = null
@@ -151,7 +155,11 @@ onUnmounted(() => {
     <!-- ── 初始化状态横幅（首次运行下载模型/构建知识库） ── -->
     <div v-if="initStatus === 'running'" class="init-banner">
       <span class="init-spinner"></span>
-      正在初始化知识库（首次运行需下载嵌入模型并构建 ffmpeg/ffprobe 知识库，约需几分钟），请耐心等待…
+      <div class="init-body">
+        <span class="init-text">{{ initStep || '正在初始化…' }}</span>
+        <div class="init-bar"><div class="init-fill" :style="{ width: Math.max(3, initProgress) + '%' }"></div></div>
+      </div>
+      <span class="init-pct">{{ initProgress }}%</span>
     </div>
     <div v-else-if="initStatus === 'error'" class="init-banner error">
       ⚠️ 初始化失败：{{ initError.substring(0, 300) }}
@@ -435,6 +443,21 @@ a:hover { text-decoration: underline; }
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   flex-shrink: 0;
+}
+.init-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.init-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.init-pct { font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.init-bar {
+  height: 5px;
+  background: #fde68a;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.init-fill {
+  height: 100%;
+  background: #f59e0b;
+  border-radius: 999px;
+  transition: width 0.4s ease;
 }
 
 /* ── Responsive ── */

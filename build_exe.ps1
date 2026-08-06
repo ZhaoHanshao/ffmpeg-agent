@@ -7,9 +7,10 @@
     流程：
       1. 确定版本号（默认读取 VERSION）
       2. 构建前端（npm install + npm run build → frontend/dist）
-      3. 下载 gyan.dev ffmpeg essentials（缓存到 release/tools），解出 ffmpeg.exe/ffprobe.exe 到 ffmpeg/
+      3. 导出 ONNX 嵌入模型（backend/build_bge_onnx.py → backend/data/bge_onnx）
       4. 运行 PyInstaller 生成 release/dist/ffmpeg-agent（onedir, 无控制台）
       5. 压缩为 release/ffmpeg-agent-win64-v<版本>.zip
+      （ffmpeg/ffprobe 不再打包，由应用首跑自动下载到 exe 旁 backend\bin\）
 
 .PARAMETER Version
     指定版本号（如 0.2.0）。缺省读取 VERSION 文件。
@@ -63,67 +64,34 @@ if (-not (Test-Path (Join-Path $Root 'frontend\dist\index.html'))) {
     throw 'frontend/dist 不存在，请先构建前端或使用 -SkipFrontend'
 }
 
-# ── 2. ffmpeg 二进制 ──
-Write-Step 'Step 2/4 准备 ffmpeg/ffprobe 二进制'
-$ffmpegDir = Join-Path $Root 'ffmpeg'
-if (-not (Test-Path (Join-Path $ffmpegDir 'ffmpeg.exe'))) {
-    $toolsDir = Join-Path $Root 'release\tools'
-    New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
-    $binDir = $null
-
-    # 尝试多个来源：gyan.dev → BtbN(GitHub) → 本机已安装的 ffmpeg
-    $sources = @(
-        'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip',
-        'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip'
-    )
-    foreach ($url in $sources) {
-        $zipPath = Join-Path $toolsDir ('ffmpeg-' + ([IO.Path]::GetFileNameWithoutExtension($url).Replace('ffmpeg-', '')) + '.zip')
-        Write-Host "  下载 ffmpeg: $url ..."
-        try {
-            Invoke-WebRequest -Uri $url -OutFile $zipPath -TimeoutSec 600
-            if (Test-Path $zipPath -and (Get-Item $zipPath).Length -gt 10MB) {
-                $unzipDir = Join-Path $toolsDir ("ffmpeg-" + ([IO.Path]::GetFileNameWithoutExtension($url).Replace('ffmpeg-', '')))
-                if (Test-Path $unzipDir) { Remove-Item -Recurse -Force $unzipDir }
-                Expand-Archive -Path $zipPath -DestinationPath $unzipDir -Force
-                $binDir = Get-ChildItem $unzipDir -Recurse -Directory -Filter 'bin' | Select-Object -First 1
-                if ($binDir) { break }
-            }
-        } catch {
-            Write-Warning "  下载失败: $($_.Exception.Message)"
-        }
-    }
-
-    # 兜底：从本机已安装的 ffmpeg 复制
-    if (-not $binDir) {
-        Write-Host '  在线下载失败，尝试从本机 ffmpeg 复制 ...'
-        $localBins = @(
-            (Join-Path $env:USERPROFILE 'scoop\apps\ffmpeg\current\bin'),
-            'D:\软件\工具\ffmpeg'
-        ) | ForEach-Object { Get-ChildItem $_ -Recurse -Filter 'ffmpeg.exe' -ErrorAction SilentlyContinue | ForEach-Object { $_.DirectoryName } }
-        $localBin = $localBins | Select-Object -First 1
-        if (-not $localBin) {
-            $localBin = Get-ChildItem 'D:\' -Recurse -Filter 'ffmpeg.exe' -ErrorAction SilentlyContinue -Depth 4 |
-                Where-Object { $_.FullName -match '\\bin\\ffmpeg\.exe$' } |
-                Select-Object -First 1 -ExpandProperty DirectoryName
-        }
-        if ($localBin) {
-            $binDir = [pscustomobject]@{ FullName = $localBin }
-        }
-    }
-
-    if (-not $binDir -or -not (Test-Path (Join-Path $binDir.FullName 'ffmpeg.exe'))) {
-        throw '未能获取 ffmpeg/ffprobe：gyan.dev 与 BtbN 均下载失败，且未在本机找到 ffmpeg.exe。请手动放置到 ffmpeg/ 目录后重试'
-    }
-    New-Item -ItemType Directory -Force -Path $ffmpegDir | Out-Null
-    Copy-Item (Join-Path $binDir.FullName 'ffmpeg.exe') $ffmpegDir -Force
-    Copy-Item (Join-Path $binDir.FullName 'ffprobe.exe') $ffmpegDir -Force
-    Write-Host "  ffmpeg/ffprobe 复制到 $ffmpegDir"
+# ── 2. 导出 ONNX 嵌入模型 ──
+Write-Step 'Step 2/4 导出 ONNX 嵌入模型（backend/data/bge_onnx）'
+$onnxDir = Join-Path $Root 'backend\data\bge_onnx'
+if (Test-Path (Join-Path $onnxDir 'model.onnx')) {
+    Write-Host '  model.onnx 已存在，跳过导出'
 } else {
-    Write-Host '  ffmpeg/ffprobe 已存在，跳过下载'
+    & $Py (Join-Path $Root 'backend\build_bge_onnx.py')
+    Assert-ExitOk $LASTEXITCODE 'ONNX 模型导出失败'
+}
+if (-not (Test-Path (Join-Path $onnxDir 'model.onnx'))) {
+    throw '未找到 backend/data/bge_onnx/model.onnx'
 }
 
-# ── 3. PyInstaller 打包 ──
-Write-Step 'Step 3/4 PyInstaller 打包（耗时较长）'
+# ── 3. 预构建向量库（离线，用本地文档缓存 + ONNX 嵌入器） ──
+Write-Step 'Step 3/5 预构建 Chroma 向量库（backend/data/chroma_db）'
+$dbFile = Join-Path $Root 'backend\data\chroma_db\chroma.sqlite3'
+if (Test-Path $dbFile) {
+    Write-Host '  chroma_db 已存在，跳过构建'
+} else {
+    & $Py (Join-Path $Root 'backend\build_package_db.py')
+    Assert-ExitOk $LASTEXITCODE '向量库构建失败（需 backend/data/docs 下的 ffmpeg-all.html / ffprobe-all.html，或用 .\build_package_db.py 联网抓取）'
+}
+if (-not (Test-Path $dbFile)) {
+    throw '未找到 backend/data/chroma_db/chroma.sqlite3'
+}
+
+# ── 4. PyInstaller 打包 ──
+Write-Step 'Step 4/5 PyInstaller 打包（耗时较长）'
 $distDir = Join-Path $Root 'release\dist'
 $workDir = Join-Path $Root 'release\build'
 & $Py -m PyInstaller --noconfirm --clean `
@@ -137,8 +105,8 @@ if (-not (Test-Path (Join-Path $appDir 'ffmpeg-agent.exe'))) {
     throw "构建产物缺失: $appDir\ffmpeg-agent.exe"
 }
 
-# ── 4. 压缩发布包 ──
-Write-Step 'Step 4/4 压缩发布包'
+# ── 5. 压缩发布包 ──
+Write-Step 'Step 5/5 压缩发布包'
 $outZip = Join-Path $Root "release\ffmpeg-agent-win64-v$Version.zip"
 if (Test-Path $outZip) { Remove-Item -Force $outZip }
 # 优先 tar (支持 zip64/大体积)，否则 Compress-Archive

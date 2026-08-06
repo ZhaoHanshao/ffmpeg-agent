@@ -17,18 +17,9 @@ if FROZEN:
     os.environ.setdefault('DB_DIR', os.path.join(_exe_dir, 'backend', 'data', 'chroma_db'))
     os.environ.setdefault('COLLECTION_NAME', 'ffmpeg_docs')
     os.environ.setdefault('PROBE_COLLECTION_NAME', 'ffprobe_docs')
-    os.environ.setdefault('BGE_CACHE_DIR', os.path.join(_exe_dir, 'backend', 'data', 'bge_small'))
+    os.environ.setdefault('BGE_CACHE_DIR', os.path.join(_exe_dir, 'backend', 'data', 'bge_onnx'))
     os.environ.setdefault('UPLOAD', os.path.join(_exe_dir, 'backend', 'upload'))
     os.environ.setdefault('DOWNLOAD', os.path.join(_exe_dir, 'backend', 'download'))
-
-    # 冻结环境修复：torch.distributed 的定义在 PyInstaller 冻结环境下执行其
-    # 原生初始化 torch._C._c10d_init() 会触发原生崩溃（0xc0000409）。
-    # 本应用不使用分布式功能：删除 _c10d_init 属性后
-    # torch.distributed.is_available() 返回 False，初始化被跳过，
-    # 但 torch.distributed 仍是真实包，子模块（如 rpc）可正常导入。
-    import torch  # noqa: E402
-    if hasattr(torch._C, '_c10d_init'):
-        del torch._C._c10d_init
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
@@ -103,17 +94,39 @@ app.add_middleware(
 
 
 # 初始化状态：冻结模式下预加载在后台线程执行，健康检查据此返回状态
-_init_state = {'status': 'running'}  # running / ok / error
+_init_state = {'status': 'running', 'progress': 0, 'step': '启动中', 'error': None}  # running / ok / error
 
 
 def _preload():
     try:
-        logger.info('预加载模型和向量库')
+        def _progress(pct, msg):
+            _init_state['progress'] = pct
+            _init_state['step'] = msg
+            logger.info(f'预加载进度 {pct}%：{msg}')
+
+        if FROZEN:
+            from app.ffmpeg_download import ensure_ffmpeg_bin
+            _bin_dir = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), 'backend', 'bin')
+            _progress(0, '检查 ffmpeg...')
+            ensure_ffmpeg_bin(_bin_dir, on_progress=_progress)
+
+            # 使用内置（打包期构建）向量库，避免首跑联网抓取 ffmpeg.org
+            _bundled_db = os.path.join(sys._MEIPASS, 'backend', 'data', 'chroma_db')
+            _db_dir = os.environ.get('DB_DIR', '')
+            if (_db_dir and not os.path.isfile(os.path.join(_db_dir, 'chroma.sqlite3'))
+                    and os.path.isfile(os.path.join(_bundled_db, 'chroma.sqlite3'))):
+                os.makedirs(_db_dir, exist_ok=True)
+                shutil.copytree(_bundled_db, _db_dir, dirs_exist_ok=True)
+                _progress(70, '准备内置知识库...')
+
+        _progress(80, '初始化 ffmpeg 知识库...')
         from app.db_search import _ensure_vector_db, _get_vector_db, _ensure_probe_vector_db, _get_probe_vector_db
         _ensure_vector_db()
         _get_vector_db()
+        _progress(95, '初始化 ffprobe 知识库...')
         _ensure_probe_vector_db()
         _get_probe_vector_db()
+        _progress(100, '就绪')
         _init_state['status'] = 'ok'
         logger.info('预加载完成')
     except Exception:
@@ -424,7 +437,12 @@ async def update_llm_settings(body: dict):
 
 @app.get("/api/health")
 async def health():
-    return {"status": _init_state['status'], "error": _init_state.get('error', '')}
+    return {
+        "status": _init_state['status'],
+        "progress": _init_state.get('progress', 0),
+        "step": _init_state.get('step', ''),
+        "error": _init_state.get('error', ''),
+    }
 
 
 app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

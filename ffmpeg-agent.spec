@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec：ffmpeg-agent Windows 便携版（onedir, 无控制台）
-# 构建前需先：npm run build（frontend/dist）、下载 ffmpeg/ffprobe.exe 到 ffmpeg/
+# 构建前需先：npm run build（frontend/dist）、导出 ONNX 嵌入模型（backend/data/bge_onnx，由 build_exe.ps1 自动执行）
 # 用法：.venv\Scripts\python -m PyInstaller --noconfirm --clean ffmpeg-agent.spec
 
 import os
@@ -23,7 +23,6 @@ def add_collect(pkg):
 # 动态导入较多、hooks 覆盖不全的包
 for pkg in (
     'chromadb',
-    'sentence_transformers',
     'langchain',
     'langchain_core',
     'langchain_openai',
@@ -45,16 +44,18 @@ hiddenimports += [
     'app.tools',
     'app.model',
     'app.db_search',
+    'app.onnx_embed',
+    'app.ffmpeg_download',
     'app.build_vector_db',
     'dotenv',
     'multipart',
 ]
 
-# 数据文件：前端构建产物 + ffmpeg/ffprobe 可执行文件
+# 数据文件：前端构建产物 + ONNX 嵌入模型 + 预构建向量库（运行时无 torch、不依赖 ffmpeg.org）
 datas += [
     ('frontend/dist', 'frontend/dist'),
-    ('ffmpeg/ffmpeg.exe', 'ffmpeg'),
-    ('ffmpeg/ffprobe.exe', 'ffmpeg'),
+    ('backend/data/bge_onnx', 'backend/data/bge_onnx'),
+    ('backend/data/chroma_db', 'backend/data/chroma_db'),
 ]
 
 a = Analysis(
@@ -70,6 +71,15 @@ a = Analysis(
         'PIL',
         'matplotlib',
         'IPython',
+        # 运行时不再需要 torch/transformers/sentence_transformers/scipy/sklearn
+        # （嵌入走 onnxruntime+tokenizers，ffmpeg 首跑下载）——排除避免误收集
+        'torch',
+        'transformers',
+        'sentence_transformers',
+        'scipy',
+        'sklearn',
+        'datasets',
+        'accelerate',
     ],
     noarchive=False,
 )

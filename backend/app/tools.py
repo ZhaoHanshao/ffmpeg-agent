@@ -17,9 +17,23 @@ def _is_frozen() -> bool:
 
 
 def ffmpeg_bin(name: str) -> str:
-    """冻结模式下返回包内 ffmpeg/ffprobe 可执行文件路径，否则返回裸命令名。"""
+    """解析 ffmpeg/ffprobe 可执行文件路径：
+    - 冻结模式：优先 exe 旁 backend/bin（首跑下载目录），否则包内 _MEIPASS/ffmpeg（旧版回退）
+    - dev 模式：返回裸命令名（依赖系统 PATH）
+    """
     if _is_frozen():
-        return os.path.join(sys._MEIPASS, 'ffmpeg', f'{name}.exe')
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        cands = [
+            os.path.join(exe_dir, 'backend', 'bin', f'{name}.exe'),
+            os.path.join(sys._MEIPASS, 'ffmpeg', f'{name}.exe'),
+        ]
+        for c in cands:
+            if os.path.isfile(c):
+                return c
+        raise RuntimeError(
+            f'未找到 {name}.exe（请先完成首次运行：应用会自动下载 ffmpeg；'
+            f'若自动下载失败，可手动将 ffmpeg.exe/ffprobe.exe 放到 exe 旁 backend\\bin\\ 目录）'
+        )
     return name
 
 

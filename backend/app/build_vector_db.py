@@ -9,12 +9,18 @@ logger = logging.getLogger(__name__)
 
 def fetch_and_chunk(url: str) -> list[Document]:
     logger.info(f'正在获取文档: {url}')
-    resp = requests.get(url, timeout=120, headers={
-        'User-Agent': 'Mozilla/5.0 (compatible; FFmpeg-Agent/1.0)'
-    })
-    resp.raise_for_status()
+    if url.startswith(('http://', 'https://')):
+        resp = requests.get(url, timeout=120, headers={
+            'User-Agent': 'Mozilla/5.0 (compatible; FFmpeg-Agent/1.0)'
+        })
+        resp.raise_for_status()
+        html = resp.text
+    else:
+        # 本地文件（打包期预取缓存，避免运行时依赖 ffmpeg.org）
+        with open(url, 'r', encoding='utf-8', errors='replace') as f:
+            html = f.read()
 
-    soup = BeautifulSoup(resp.text, 'lxml')
+    soup = BeautifulSoup(html, 'lxml')
     headings = soup.find_all(['h2', 'h3', 'h4'])
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)

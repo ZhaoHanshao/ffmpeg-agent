@@ -1,7 +1,7 @@
 import os, shutil, logging
 from functools import lru_cache
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
+from app.onnx_embed import BGEOnnxEmbedding, resolve_model_dir
 from langchain_chroma import Chroma
 from langchain_core.embeddings import Embeddings
 
@@ -12,39 +12,24 @@ logger = logging.getLogger(__name__)
 DB_DIR = os.getenv('DB_DIR')
 COLLECTION_NAME = os.getenv('COLLECTION_NAME')
 PROBE_COLLECTION_NAME = os.getenv('PROBE_COLLECTION_NAME', 'ffprobe_docs')
-BGE_CACHE_DIR = os.getenv('BGE_CACHE_DIR', 'backend/data/bge_small')
-BGE_MODEL_NAME = os.getenv('BGE_MODEL_NAME', 'BAAI/bge-small-zh-v1.5')
-HF_ENDPOINT = os.getenv('HF_ENDPOINT', '')
+BGE_CACHE_DIR = os.getenv('BGE_CACHE_DIR', 'backend/data/bge_onnx')
 
 
 class BGEEmbedding(Embeddings):
 
-    def __init__(self, path=None, model_name=None):
+    def __init__(self, path=None):
         super().__init__()
-        path = path or BGE_CACHE_DIR
-        model_name = model_name or BGE_MODEL_NAME
-
-        if not os.path.isdir(path) or not os.listdir(path):
-            logger.info(f'正在下载嵌入模型 {model_name} 到 {path} ...')
-            os.makedirs(path, exist_ok=True)
-            if HF_ENDPOINT:
-                os.environ['HF_ENDPOINT'] = HF_ENDPOINT
-            temp = SentenceTransformer(model_name)
-            temp.save(path)
-
-        self.model = SentenceTransformer(path)
+        self.model = BGEOnnxEmbedding(path or resolve_model_dir())
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        embeddings = self.model.encode(texts, normalize_embeddings=True)
-        return embeddings.tolist()
+        return self.model.embed_documents(texts)
 
     def embed_query(self, text: str) -> list[float]:
-        embeddings = self.model.encode([text], normalize_embeddings=True)
-        return embeddings.tolist()[0]
+        return self.model.embed_query(text)
 
 
 def get_embeddings() -> Embeddings:
-    return BGEEmbedding(path=BGE_CACHE_DIR)
+    return BGEEmbedding()
 
 
 @lru_cache(maxsize=1)
