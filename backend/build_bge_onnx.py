@@ -73,6 +73,10 @@ def main():
             shutil.copy2(s, os.path.join(out, f))
 
     os.remove(os.path.join(out, 'model-fp32.onnx'))
+    for stale in ('model-fp32.onnx.data', 'model-fp32.onnx.data.json'):
+        p = os.path.join(out, stale)
+        if os.path.isfile(p):
+            os.remove(p)
     onnx.checker.check_model(os.path.join(out, 'model.onnx'))
     size_mb = os.path.getsize(os.path.join(out, 'model.onnx')) / 1e6
     print(f'输出目录: {out}  model.onnx = {size_mb:.1f} MB')
