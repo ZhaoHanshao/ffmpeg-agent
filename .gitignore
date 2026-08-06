@@ -13,3 +13,8 @@ docker-deploy-guide.md
 /backend/tests
 api-contract.md
 api-contract.pdf
+/ffmpeg/
+/release/build/
+/release/dist/
+/release/tools/
+/release/*.zip

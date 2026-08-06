@@ -1,7 +1,8 @@
 <script setup>
-import { ref, onMounted, watch, nextTick, computed } from 'vue'
+import { ref, onMounted, watch, nextTick, computed, onUnmounted } from 'vue'
 import { useChat } from './composables/useChat'
 import { useSettings } from './composables/useSettings'
+import { api } from './api'
 import MessageItem from './components/MessageItem.vue'
 import FilePanel from './components/FilePanel.vue'
 import SelectedFilesBar from './components/SelectedFilesBar.vue'
@@ -10,6 +11,25 @@ import SettingsModal from './components/SettingsModal.vue'
 // ── 模式：ffmpeg 处理 / ffprobe 分析 ──
 const mode = ref('ffmpeg')
 const leftCollapsed = ref(false)
+
+// ── 初始化状态（首次运行后台下载模型、构建知识库） ──
+const initStatus = ref('ok')
+const initError = ref('')
+let healthTimer = null
+
+function pollHealth() {
+  api
+    .health()
+    .then((h) => {
+      initStatus.value = h.status || 'ok'
+      initError.value = h.error || ''
+      if (initStatus.value === 'ok') {
+        clearInterval(healthTimer)
+        healthTimer = null
+      }
+    })
+    .catch(() => {})
+}
 
 const {
   messages,
@@ -95,7 +115,13 @@ async function onSend() {
 
 onMounted(() => {
   if (window.matchMedia?.('(max-width: 768px)').matches) leftCollapsed.value = true
+  pollHealth()
+  healthTimer = setInterval(pollHealth, 3000)
   loadSettings()
+})
+
+onUnmounted(() => {
+  if (healthTimer) clearInterval(healthTimer)
 })
 </script>
 
@@ -121,6 +147,15 @@ onMounted(() => {
         <button class="icon-btn" title="LLM 设置" @click="showSettings = true">⚙️</button>
       </div>
     </header>
+
+    <!-- ── 初始化状态横幅（首次运行下载模型/构建知识库） ── -->
+    <div v-if="initStatus === 'running'" class="init-banner">
+      <span class="init-spinner"></span>
+      正在初始化知识库（首次运行需下载嵌入模型并构建 ffmpeg/ffprobe 知识库，约需几分钟），请耐心等待…
+    </div>
+    <div v-else-if="initStatus === 'error'" class="init-banner error">
+      ⚠️ 初始化失败：{{ initError.substring(0, 300) }}
+    </div>
 
     <!-- ── 设置弹窗 ── -->
     <SettingsModal
@@ -372,6 +407,35 @@ a:hover { text-decoration: underline; }
 
 /* ── Keyframes ── */
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Init Banner ── */
+.init-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  background: #fff7e6;
+  color: #b45309;
+  border-bottom: 1px solid #fde68a;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.init-banner.error {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-bottom-color: #fecaca;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.init-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #f59e0b;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
 
 /* ── Responsive ── */
 @media (max-width: 640px) {

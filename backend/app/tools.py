@@ -2,7 +2,7 @@ from langchain.tools import tool
 from langchain_core.runnables import RunnableConfig
 from app.db_search import get_text, get_probe_text
 from dotenv import load_dotenv
-import os, subprocess, shlex, logging
+import os, sys, subprocess, shlex, logging
 
 load_dotenv()
 
@@ -10,6 +10,17 @@ logger = logging.getLogger(__name__)
 
 DOWNLOAD = os.getenv('DOWNLOAD', 'backend/download')
 UPLOAD = os.getenv('UPLOAD', 'backend/upload')
+
+
+def _is_frozen() -> bool:
+    return bool(getattr(sys, 'frozen', False))
+
+
+def ffmpeg_bin(name: str) -> str:
+    """冻结模式下返回包内 ffmpeg/ffprobe 可执行文件路径，否则返回裸命令名。"""
+    if _is_frozen():
+        return os.path.join(sys._MEIPASS, 'ffmpeg', f'{name}.exe')
+    return name
 
 
 def split_command(cmd: str) -> list:
@@ -132,7 +143,9 @@ def execute_command(command: str, config: RunnableConfig):
                 os.remove(fp)
 
     try:
-        exit_code = subprocess.run(args=split_command(command), capture_output=True)
+        run_parts = split_command(command)
+        run_parts[0] = ffmpeg_bin('ffmpeg')
+        exit_code = subprocess.run(args=run_parts, capture_output=True)
         if exit_code.returncode == 0:
             return {'command': command, 'flag': True, 'command_result': f'{command} 执行成功'}
         else:
@@ -168,7 +181,9 @@ def execute_probe_command(command: str):
         }
 
     try:
-        proc = subprocess.run(args=split_command(command), capture_output=True)
+        run_parts = split_command(command)
+        run_parts[0] = ffmpeg_bin('ffprobe')
+        proc = subprocess.run(args=run_parts, capture_output=True)
         if proc.returncode == 0:
             output = proc.stdout.decode(errors='replace').strip()
             return {

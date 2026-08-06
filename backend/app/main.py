@@ -1,4 +1,34 @@
-import os, sys, shutil, json, atexit, io, zipfile, datetime, logging, asyncio
+import os, sys, shutil, json, atexit, io, zipfile, datetime, logging, asyncio, threading, traceback
+
+# ── 冻结模式（PyInstaller 打包）预处理 ──
+# 必须在任何重依赖 import 之前执行：
+#   1) chdir 到 exe 所在目录，保证相对路径（backend/upload、frontend/dist 等）正确
+#   2) 无控制台窗口，把 stdout/stderr 重定向到 backend/logs/app.log
+#   3) 提前设置数据目录环境变量（db_search/tools 在 import 时读取，需提前注入）
+FROZEN = bool(getattr(sys, 'frozen', False))
+if FROZEN:
+    _exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    os.chdir(_exe_dir)
+    _log_dir = os.path.join(_exe_dir, 'backend', 'logs')
+    os.makedirs(_log_dir, exist_ok=True)
+    _log_path = os.path.join(_log_dir, 'app.log')
+    sys.stdout = open(_log_path, 'a', encoding='utf-8', buffering=1)
+    sys.stderr = open(_log_path, 'a', encoding='utf-8', buffering=1)
+    os.environ.setdefault('DB_DIR', os.path.join(_exe_dir, 'backend', 'data', 'chroma_db'))
+    os.environ.setdefault('COLLECTION_NAME', 'ffmpeg_docs')
+    os.environ.setdefault('PROBE_COLLECTION_NAME', 'ffprobe_docs')
+    os.environ.setdefault('BGE_CACHE_DIR', os.path.join(_exe_dir, 'backend', 'data', 'bge_small'))
+    os.environ.setdefault('UPLOAD', os.path.join(_exe_dir, 'backend', 'upload'))
+    os.environ.setdefault('DOWNLOAD', os.path.join(_exe_dir, 'backend', 'download'))
+
+    # 冻结环境修复：torch.distributed 的定义在 PyInstaller 冻结环境下执行其
+    # 原生初始化 torch._C._c10d_init() 会触发原生崩溃（0xc0000409）。
+    # 本应用不使用分布式功能：删除 _c10d_init 属性后
+    # torch.distributed.is_available() 返回 False，初始化被跳过，
+    # 但 torch.distributed 仍是真实包，子模块（如 rpc）可正常导入。
+    import torch  # noqa: E402
+    if hasattr(torch._C, '_c10d_init'):
+        del torch._C._c10d_init
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
@@ -9,20 +39,37 @@ from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger(__name__)
 
-# 确保 CWD 指向项目根目录，使后续 import 和 load_dotenv() 的路径正确
-_backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-os.chdir(os.path.dirname(_backend_dir))
-
-# 确保 backend/ 在 sys.path 中，使 app 包可被 import
-if _backend_dir not in sys.path:
-    sys.path.insert(0, _backend_dir)
+# dev 模式：确保 CWD 指向项目根目录，使后续 import 和 load_dotenv() 路径正确
+if not FROZEN:
+    _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.chdir(os.path.dirname(_backend_dir))
+    if _backend_dir not in sys.path:
+        sys.path.insert(0, _backend_dir)
 
 # 重依赖（langchain → transformers/torch）导入可能耗时数十秒，先打印提示避免"长时间无输出"
 print('正在启动 FFmpeg Agent，加载后端依赖（首次约需 10~60 秒）...', flush=True)
 
-from app.graph import exec_graph, build_chat_prompt, probe_exec_graph, build_probe_chat_prompt
-from app.agents import ensure_agents, ensure_probe_agents
-from langchain.messages import HumanMessage
+
+def _step_import(label, what):
+    print(f'[step] {label} ({what}) ...', flush=True)
+    import importlib
+    module = importlib.import_module(what)
+    print(f'[step] {label} ok', flush=True)
+    return module
+
+
+_graph_mod = _step_import('app.graph', 'app.graph')
+exec_graph = _graph_mod.exec_graph
+build_chat_prompt = _graph_mod.build_chat_prompt
+probe_exec_graph = _graph_mod.probe_exec_graph
+build_probe_chat_prompt = _graph_mod.build_probe_chat_prompt
+
+_agents_mod = _step_import('app.agents', 'app.agents')
+ensure_agents = _agents_mod.ensure_agents
+ensure_probe_agents = _agents_mod.ensure_probe_agents
+
+_messages_mod = _step_import('langchain.messages', 'langchain.messages')
+HumanMessage = _messages_mod.HumanMessage
 
 print('后端依赖加载完成', flush=True)
 
@@ -30,6 +77,9 @@ load_dotenv()
 
 UPLOAD_DIR = os.getenv('UPLOAD', 'backend/upload')
 DOWNLOAD_DIR = os.getenv('DOWNLOAD', 'backend/download')
+
+# 冻结模式下资源在 _MEIPASS（onedir = _internal 目录）内
+FRONTEND_DIST = os.path.join(sys._MEIPASS, 'frontend', 'dist') if FROZEN else 'frontend/dist'
 
 # 启动时清理历史数据 + 程序退出时清理
 def _cleanup():
@@ -52,15 +102,33 @@ app.add_middleware(
 )
 
 
+# 初始化状态：冻结模式下预加载在后台线程执行，健康检查据此返回状态
+_init_state = {'status': 'running'}  # running / ok / error
+
+
+def _preload():
+    try:
+        logger.info('预加载模型和向量库')
+        from app.db_search import _ensure_vector_db, _get_vector_db, _ensure_probe_vector_db, _get_probe_vector_db
+        _ensure_vector_db()
+        _get_vector_db()
+        _ensure_probe_vector_db()
+        _get_probe_vector_db()
+        _init_state['status'] = 'ok'
+        logger.info('预加载完成')
+    except Exception:
+        logger.exception('预加载模型或向量库失败')
+        _init_state['status'] = 'error'
+        _init_state['error'] = traceback.format_exc()
+
+
 @app.on_event("startup")
 def preload_models():
-    logger.info('预加载模型和向量库')
-    from app.db_search import _ensure_vector_db, _get_vector_db, _ensure_probe_vector_db, _get_probe_vector_db
-    _ensure_vector_db()
-    _get_vector_db()
-    _ensure_probe_vector_db()
-    _get_probe_vector_db()
-    logger.info('预加载完成')
+    # 冻结模式下后台预加载，不阻塞 web 服务（首跑建库需数分钟）
+    if FROZEN:
+        threading.Thread(target=_preload, daemon=True).start()
+    else:
+        _preload()
 
 
 def _clear_dir(path: str):
@@ -165,6 +233,12 @@ def _sanitize_selected_files(files: list[str]) -> list[str]:
 @app.post("/api/chat")
 async def chat(question: str = Form(...), files: list[str] = Form(default=[])):
     """发送问题 → 流式输出（ffmpeg search+execute 进度 + chat 逐 token）"""
+    if _init_state['status'] == 'running':
+        return Response(
+            content=f"data: {json.dumps({'event': 'error', 'text': '正在初始化知识库（首次运行需下载模型，请稍候）'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
+            media_type="text/event-stream",
+        )
+
     if not ensure_agents():
         return Response(
             content=f"data: {json.dumps({'event': 'error', 'text': 'LLM 未配置，请先在页面右上角 ⚙️ 设置中填写模型信息'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
@@ -193,6 +267,12 @@ async def chat(question: str = Form(...), files: list[str] = Form(default=[])):
 @app.post("/api/probe/chat")
 async def probe_chat(question: str = Form(...), files: list[str] = Form(default=[])):
     """发送问题 → 流式输出（ffprobe search+execute 进度 + chat 逐 token）"""
+    if _init_state['status'] == 'running':
+        return Response(
+            content=f"data: {json.dumps({'event': 'error', 'text': '正在初始化知识库（首次运行需下载模型，请稍候）'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
+            media_type="text/event-stream",
+        )
+
     if not ensure_probe_agents():
         return Response(
             content=f"data: {json.dumps({'event': 'error', 'text': 'LLM 未配置，请先在页面右上角 ⚙️ 设置中填写模型信息'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
@@ -344,10 +424,10 @@ async def update_llm_settings(body: dict):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": _init_state['status'], "error": _init_state.get('error', '')}
 
 
-app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
+app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 
 if __name__ == '__main__':
     import uvicorn

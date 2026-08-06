@@ -1,19 +1,23 @@
 ﻿<#
 .SYNOPSIS
-    一键生成 ffmpeg-agent 的 GitHub Release：本地构建前端、打包 zip、打 tag、gh 创建 Release，并按需推送 Docker 镜像到 GHCR。
+    一键生成 ffmpeg-agent 的 GitHub Release：本地构建前端、打包 zip、打 tag、gh 创建 Release，并按需构建 Windows exe 包、推送 Docker 镜像到 GHCR。
 
 .DESCRIPTION
     流程：
       1. 检查 gh 登录状态与 write:packages 权限
       2. 确定版本号（默认读取 VERSION 文件，可用 -Version 覆盖）
-      3. 构建前端（npm ci + npm run build）
+      3. 构建前端（npm install + npm run build）
       4. 组装并压缩 ffmpeg-agent-v<版本>.zip 到 release/ 目录
       5. 打 tag v<版本> 并推送 origin
       6. gh release create v<版本> <zip> --generate-notes
-      7. （除非 -SkipDocker）docker build + push ghcr.io/ZhaoHanshao/ffmpeg-agent 并设为 public
+      7. （-Exe 时）调用 build_exe.ps1 构建 Windows exe 包并上传为 release 资产
+      8. （除非 -SkipDocker）docker build + push ghcr.io/ZhaoHanshao/ffmpeg-agent 并设为 public
 
 .PARAMETER Version
     指定版本号（如 0.2.0）。缺省读取 VERSION 文件的当前值（如 0.1.0）。
+
+.PARAMETER Exe
+    同时构建 Windows 便携版 exe 包（调 build_exe.ps1，耗时 15~30 分钟）并上传到 Release。
 
 .PARAMETER SkipDocker
     跳过 Docker 镜像构建与推送。
@@ -25,11 +29,13 @@
     .\release.ps1                     # 按 VERSION 文件发版
     .\release.ps1 -Version 0.2.0      # 指定版本
     .\release.ps1 -SkipDocker         # 只出 zip + Release，不推镜像
+    .\release.ps1 -Exe -SkipDocker    # 源码 zip + Windows exe 包，不推镜像
 #>
 
 [CmdletBinding()]
 param(
     [string]$Version,
+    [switch]$Exe,
     [switch]$SkipDocker,
     [switch]$Yes
 )
@@ -158,9 +164,21 @@ gh release create $Tag $ZipPath --generate-notes
 Assert-ExitOk $LASTEXITCODE "gh release create $Tag 失败"
 Write-Host "  Release: https://github.com/$RepoOwner/$RepoName/releases/tag/$Tag" -ForegroundColor Green
 
+# ── 可选：Windows exe 包 ──
+if ($Exe) {
+    Write-Step 'Step 7/8 构建 Windows 便携版 exe 包（约 15~30 分钟）'
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'build_exe.ps1') -Version $Version
+    Assert-ExitOk $LASTEXITCODE 'build_exe.ps1 失败（构建 exe 包失败）'
+    $exeZip = Join-Path $Root "release\ffmpeg-agent-win64-v$Version.zip"
+    if (-not (Test-Path $exeZip)) { throw "未找到 exe 包: $exeZip" }
+    gh release upload $Tag $exeZip --clobber
+    Assert-ExitOk $LASTEXITCODE "上传 exe 包失败"
+    Write-Host "  已上传: $exeZip" -ForegroundColor Green
+}
+
 # ── Docker（可选）──
 if (-not $SkipDocker) {
-    Write-Step 'Step 7/7 Docker 构建并推送 GHCR 镜像'
+    Write-Step 'Step 8/8 Docker 构建并推送 GHCR 镜像'
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         Write-Warning '未安装 docker，跳过镜像推送'
     } else {

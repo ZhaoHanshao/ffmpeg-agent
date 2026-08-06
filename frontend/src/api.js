@@ -48,6 +48,9 @@ export const api = {
       body: JSON.stringify(body),
     }).then((r) => r.json())
   },
+  health() {
+    return request('/health').then((r) => r.json())
+  },
 }
 
 export { API_BASE }
