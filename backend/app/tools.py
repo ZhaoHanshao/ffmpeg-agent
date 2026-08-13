@@ -140,10 +140,47 @@ def _check_inputs(parts: list) -> list:
     return denied
 
 
-def _run_binary(run_parts: list, timeout: int, label: str, stop_event=None, proc_box=None):
+def _fmt_time(seconds: float) -> str:
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m:02d}:{sec:02d}'
+
+
+def _first_input_file(run_parts: list):
+    """返回第一个 -i 参数指向的本地文件路径(用于探测时长),无则 None。"""
+    for i, p in enumerate(run_parts):
+        if p == '-i' and i + 1 < len(run_parts):
+            val = run_parts[i + 1]
+            if val in VIRTUAL_SOURCES or val.split('=')[0].split(':')[0] in VIRTUAL_SOURCES or '://' in val:
+                continue
+            path = os.path.join(os.getcwd(), val)
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+def _probe_duration(path: str) -> float:
+    """用 ffprobe 快速读取媒体时长(秒),失败返回 0。"""
+    try:
+        probe = ffmpeg_bin('ffprobe')
+        args = [probe, '-v', 'error', '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1', path]
+        with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
+            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr)
+            proc.communicate(timeout=15)
+            fout.seek(0)
+            text = fout.read().decode(errors='replace').strip()
+            return float(text) if text else 0.0
+    except Exception:
+        return 0.0
+
+
+def _run_binary(run_parts: list, timeout: int, label: str, stop_event=None, proc_box=None, progress_cb=None):
     """执行 ffmpeg/ffprobe 并返回 (returncode, stdout_str, stderr_str)。
     - stdin 指向空设备,避免 ffmpeg 的 Overwrite 等交互提示阻塞
     - 输出写入临时文件(避免管道写满死锁),轮询等待,超时/收到停止信号时强制 kill
+    - progress_cb 提供时,增量读取 stdout(ffmpeg -progress pipe:1 输出)回调给上层
     """
     with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
         proc = subprocess.Popen(args=run_parts, stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr)
@@ -151,6 +188,7 @@ def _run_binary(run_parts: list, timeout: int, label: str, stop_event=None, proc
             proc_box[0] = proc
         try:
             deadline = time.monotonic() + timeout
+            last_pos = 0
             while proc.poll() is None:
                 if stop_event is not None and stop_event.is_set():
                     proc.kill()
@@ -162,6 +200,13 @@ def _run_binary(run_parts: list, timeout: int, label: str, stop_event=None, proc
                     ferr.seek(0)
                     err_tail = ferr.read().decode(errors='replace')[-2000:]
                     raise TimeoutError(f'{label} 执行超过 {timeout} 秒，已强制终止。{err_tail}')
+                if progress_cb is not None:
+                    fout.seek(0, os.SEEK_END)
+                    end = fout.tell()
+                    if end > last_pos:
+                        fout.seek(last_pos)
+                        progress_cb(fout.read(end - last_pos).decode(errors='replace'))
+                        last_pos = end
                 time.sleep(0.2)
             fout.seek(0)
             ferr.seek(0)
@@ -290,8 +335,45 @@ def execute_command(command: str, config: RunnableConfig):
             # 注入 -y 静默覆盖同名输出,替代"每次清空下载目录"的粗暴做法(输出文件可跨任务保留)
             if '-y' not in run_parts and '-n' not in run_parts:
                 run_parts.insert(1, '-y')
+            # 附加进度输出:ffmpeg -progress pipe:1 写入 stdout(临时文件),解析后实时回传前端
+            outputs = find_output_indexes(run_parts)
+            has_stdout_output = any(run_parts[i] == '-' for i in outputs)
+            if '-progress' not in run_parts and not has_stdout_output:
+                run_parts[1:1] = ['-progress', 'pipe:1', '-nostats']
+
+            # 构建进度回调(带节流,2 秒内不重复上报)
+            progress_list = conf.get('progress')
+            duration = _probe_duration(_first_input_file(run_parts)) if progress_list else 0.0
+            last_report = {'t': 0.0}
+
+            def _report_progress(chunk: str):
+                if progress_list is None:
+                    return
+                ms = None
+                for line in chunk.splitlines():
+                    if line.startswith('out_time_ms='):
+                        try:
+                            ms = int(line.split('=', 1)[1])
+                        except ValueError:
+                            pass
+                    elif line.startswith('out_time_us='):
+                        try:
+                            ms = int(line.split('=', 1)[1]) // 1000
+                        except ValueError:
+                            pass
+                if ms is None or ms - last_report['t'] < 2000:
+                    return
+                last_report['t'] = ms
+                secs = ms / 1000
+                if duration > 0:
+                    pct = min(99, int(secs / duration * 100))
+                    progress_list.append(f'转码中 {pct}%（{_fmt_time(secs)} / {_fmt_time(duration)}）')
+                else:
+                    progress_list.append(f'转码中 已处理 {_fmt_time(secs)}')
+
             run_parts[0] = ffmpeg_bin('ffmpeg')
-            returncode, _, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffmpeg', stop_event, proc_box)
+            returncode, _, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffmpeg', stop_event, proc_box,
+                                                _report_progress if progress_list is not None else None)
             if returncode == 0:
                 return {'command': command, 'flag': True, 'command_result': f'{command} 执行成功'}
             else:

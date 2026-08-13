@@ -99,6 +99,7 @@ def execute(state: state):
             'selected_files': state.get('files') or [],
             'stop_event': state.get('stop_event'),
             'proc': state.get('proc_box'),
+            'progress': state.get('progress'),
         }},
     )
     for msg in reversed(res['messages']):
