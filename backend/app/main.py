@@ -1,4 +1,5 @@
-import os, sys, shutil, json, atexit, io, zipfile, datetime, logging, asyncio, threading, traceback
+import os, sys, shutil, json, re, io, zipfile, datetime, logging, asyncio, threading, traceback, secrets
+from contextlib import asynccontextmanager
 
 # ── 冻结模式（PyInstaller 打包）预处理 ──
 # 必须在任何重依赖 import 之前执行：
@@ -54,6 +55,7 @@ exec_graph = _graph_mod.exec_graph
 build_chat_prompt = _graph_mod.build_chat_prompt
 probe_exec_graph = _graph_mod.probe_exec_graph
 build_probe_chat_prompt = _graph_mod.build_probe_chat_prompt
+GraphCancelled = _graph_mod.GraphCancelled
 
 _agents_mod = _step_import('app.agents', 'app.agents')
 ensure_agents = _agents_mod.ensure_agents
@@ -69,32 +71,89 @@ load_dotenv()
 UPLOAD_DIR = os.getenv('UPLOAD', 'backend/upload')
 DOWNLOAD_DIR = os.getenv('DOWNLOAD', 'backend/download')
 
+# 上传限制：单文件最大体积(MB,0=不限制)与可选扩展名白名单(逗号分隔,空=不限制)
+try:
+    MAX_UPLOAD_SIZE = int(os.getenv('MAX_UPLOAD_SIZE_MB', '2048') or 0) * 1024 * 1024
+except ValueError:
+    MAX_UPLOAD_SIZE = 0
+UPLOAD_EXT_WHITELIST = {e.lower().lstrip('.') for e in os.getenv('UPLOAD_EXT_WHITELIST', '').split(',') if e.strip()}
+
 # 冻结模式下资源在 _MEIPASS（onedir = _internal 目录）内
 FRONTEND_DIST = os.path.join(sys._MEIPASS, 'frontend', 'dist') if FROZEN else 'frontend/dist'
 
-# 启动时清理历史数据 + 程序退出时清理
-def _cleanup():
-    for _dir in (UPLOAD_DIR, DOWNLOAD_DIR):
-        if os.path.exists(_dir):
-            shutil.rmtree(_dir)
+# 数据目录仅确保存在,不再启动/退出时清空:上传文件与转码成果跨重启保留
+def _ensure_dirs():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-_cleanup()
-atexit.register(_cleanup)
+_ensure_dirs()
 
 app = FastAPI(title="ffmpeg-agent")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 安全配置：设置 AUTH_TOKEN 后所有 /api/* 接口(除 /api/health)都需要携带令牌
+AUTH_TOKEN = os.getenv('AUTH_TOKEN', '').strip()
+# CORS：仅当显式配置 CORS_ORIGINS(逗号分隔)时才允许跨域,默认同源(前端由后端托管或走 dev 代理)
+CORS_ORIGINS = [o.strip() for o in os.getenv('CORS_ORIGINS', '').split(',') if o.strip()]
+
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if AUTH_TOKEN and request.url.path.startswith('/api/') and request.url.path != '/api/health':
+        token = request.headers.get('X-Auth-Token') or ''
+        auth = request.headers.get('Authorization') or ''
+        if auth.startswith('Bearer '):
+            token = auth[7:]
+        if not (token and secrets.compare_digest(token, AUTH_TOKEN)):
+            return Response(
+                content=json.dumps({'detail': '未授权：缺少或错误的访问令牌'}),
+                status_code=401,
+                media_type='application/json',
+            )
+    return await call_next(request)
 
 
 # 初始化状态：冻结模式下预加载在后台线程执行，健康检查据此返回状态
 _init_state = {'status': 'running', 'progress': 0, 'step': '启动中', 'error': None}  # running / ok / error
+
+# 运行中的聊天任务:job_id → {'stop': threading.Event, 'proc': [Popen|None]},用于真实取消
+_jobs = {}
+_jobs_lock = threading.Lock()
+
+
+def _register_job():
+    job_id = os.urandom(6).hex()
+    job = {'stop': threading.Event(), 'proc': [None]}
+    with _jobs_lock:
+        _jobs[job_id] = job
+    return job_id, job
+
+
+def _unregister_job(job_id: str):
+    with _jobs_lock:
+        _jobs.pop(job_id, None)
+
+
+def _stop_job(job_id: str) -> bool:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return False
+    job['stop'].set()
+    proc = job['proc'][0]
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    return True
 
 
 def _preload():
@@ -135,13 +194,17 @@ def _preload():
         _init_state['error'] = traceback.format_exc()
 
 
-@app.on_event("startup")
-def preload_models():
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     # 冻结模式下后台预加载，不阻塞 web 服务（首跑建库需数分钟）
     if FROZEN:
         threading.Thread(target=_preload, daemon=True).start()
     else:
         _preload()
+    yield
+
+
+app.router.lifespan_context = lifespan
 
 
 def _clear_dir(path: str):
@@ -150,13 +213,50 @@ def _clear_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
 
+def _safe_path(base: str, name: str):
+    """将 name 约束到 base 目录内(防路径穿越)。
+
+    返回规范化后的绝对路径;若 name 为空、含 NUL、是绝对路径或解析后逃出 base,返回 None。
+    """
+    if not name or '\x00' in name:
+        return None
+    base = os.path.realpath(os.path.abspath(base))
+    candidate = os.path.abspath(os.path.join(base, os.path.normpath(name.lstrip('/\\'))))
+    real = os.path.realpath(candidate)
+    if real != base and not real.startswith(base + os.sep):
+        return None
+    return candidate
+
+
 def _save_with_timestamp(file: UploadFile, seq: int) -> str:
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    raw = (file.filename or "file").replace('\\', '/')
+    base = os.path.basename(raw) or 'file'
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem, ext = os.path.splitext(file.filename or "file")
+    stem, ext = os.path.splitext(base)
+    # 客户端可控的文件名必须清洗:只保留安全字符,杜绝 ../../ 与非法路径写入
+    stem = re.sub(r'[^\w\-.]', '_', stem) or 'file'
+    ext = re.sub(r'[^\w.]', '', ext)[:16]
     name = f"{stem}_{stamp}_{seq}{ext}"
-    with open(os.path.join(UPLOAD_DIR, name), 'wb') as f:
-        f.write(file.file.read())
+    path = os.path.join(UPLOAD_DIR, name)
+    total = 0
+    try:
+        with open(path, 'wb') as out:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if MAX_UPLOAD_SIZE and total > MAX_UPLOAD_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f'文件超过大小限制({MAX_UPLOAD_SIZE // 1024 // 1024} MB)',
+                    )
+                out.write(chunk)
+    except HTTPException:
+        if os.path.isfile(path):
+            os.remove(path)
+        raise
     return name
 
 
@@ -169,61 +269,88 @@ async def upload_files(files: list[UploadFile] = File(...)):
     counter = {}
     for f in files:
         name = f.filename or "file"
+        if UPLOAD_EXT_WHITELIST:
+            ext = os.path.splitext(name)[1].lower().lstrip('.')
+            if not ext or ext not in UPLOAD_EXT_WHITELIST:
+                raise HTTPException(status_code=415, detail=f'不支持的文件类型：{ext or "(无扩展名)"}')
         counter[name] = counter.get(name, 0) + 1
         saved.append(_save_with_timestamp(f, counter[name]))
     logger.info(f'保存文件：{saved}')
     return {"uploaded": saved}
 
 
-async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder):
-    """公共 SSE 流：graph 进度 → meta → chat 逐 token → done"""
+async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job=None):
+    """公共 SSE 流：job → graph 进度 → meta → chat 逐 token → done"""
+    stop_event = job['stop'] if job else None
+    job_id = job['job_id'] if job else ''
     progress = []
-    graph_task = asyncio.create_task(
-        asyncio.to_thread(graph_fn, question, progress)
-    )
-
-    while not graph_task.done():
-        while progress:
-            yield f"data: {json.dumps({'event': 'status', 'text': progress.pop(0)})}\n\n"
-        await asyncio.sleep(0.2)
-
+    graph_task = None
     try:
-        exec_state = await graph_task
-    except Exception as e:
-        logger.error(f'图谱执行失败：{e}')
-        yield f"data: {json.dumps({'event': 'error', 'text': f'知识库查询或命令执行失败：{str(e)}'})}\n\n"
+        yield f"data: {json.dumps({'event': 'job', 'job_id': job_id})}\n\n"
+
+        graph_task = asyncio.create_task(
+            asyncio.to_thread(graph_fn, question, progress)
+        )
+
+        while not graph_task.done():
+            while progress:
+                yield f"data: {json.dumps({'event': 'status', 'text': progress.pop(0)})}\n\n"
+            await asyncio.sleep(0.2)
+
+        try:
+            exec_state = await graph_task
+        except GraphCancelled:
+            yield f"data: {json.dumps({'event': 'cancelled'})}\n\n"
+            yield "data: {\"event\": \"done\"}\n\n"
+            return
+        except Exception as e:
+            logger.error(f'图谱执行失败：{e}')
+            yield f"data: {json.dumps({'event': 'error', 'text': f'知识库查询或命令执行失败：{str(e)}'})}\n\n"
+            yield "data: {\"event\": \"done\"}\n\n"
+            return
+
+        output_file = exec_state.get('output_file', '') or ''
+
+        yield f"data: {json.dumps({'event': 'meta', 'output_file': output_file})}\n\n"
+
+        yield f"data: {json.dumps({'event': 'status', 'text': '正在生成回答...'})}\n\n"
+
+        chat_prompt = prompt_builder(exec_state)
+        full_text = ''
+        try:
+            async for event in chat_agent.astream_events(
+                {"messages": [HumanMessage(content=chat_prompt)]},
+                version="v2",
+            ):
+                if event["event"] == "on_chat_model_stream":
+                    chunk = event["data"]["chunk"]
+                    content = getattr(chunk, 'content', '')
+                    if content:
+                        full_text += content
+                        yield f"data: {json.dumps({'event': 'token', 'text': content})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'event': 'error', 'text': str(e)})}\n\n"
+            return
+
         yield "data: {\"event\": \"done\"}\n\n"
-        return
 
-    output_file = exec_state.get('output_file', '') or ''
-
-    yield f"data: {json.dumps({'event': 'meta', 'output_file': output_file})}\n\n"
-
-    yield f"data: {json.dumps({'event': 'status', 'text': '正在生成回答...'})}\n\n"
-
-    chat_prompt = prompt_builder(exec_state)
-    full_text = ''
-    try:
-        async for event in chat_agent.astream_events(
-            {"messages": [HumanMessage(content=chat_prompt)]},
-            version="v2",
-        ):
-            if event["event"] == "on_chat_model_stream":
-                chunk = event["data"]["chunk"]
-                content = getattr(chunk, 'content', '')
-                if content:
-                    full_text += content
-                    yield f"data: {json.dumps({'event': 'token', 'text': content})}\n\n"
-    except Exception as e:
-        yield f"data: {json.dumps({'event': 'error', 'text': str(e)})}\n\n"
-        return
-
-    yield "data: {\"event\": \"done\"}\n\n"
-
-    if full_text:
-        logger.info(f'AI回复：{full_text[:200]}')
-    if output_file:
-        logger.info(f'输出文件：{output_file}')
+        if full_text:
+            logger.info(f'AI回复：{full_text[:200]}')
+        if output_file:
+            logger.info(f'输出文件：{output_file}')
+    finally:
+        # 客户端断开/异常退出时兜底取消,确保后台 ffmpeg 与 LLM 任务不会继续空转
+        if graph_task is not None and not graph_task.done() and stop_event is not None:
+            stop_event.set()
+            if job is not None:
+                proc = job['proc'][0]
+                if proc is not None and proc.poll() is None:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+        if job_id:
+            _unregister_job(job_id)
 
 
 def _sanitize_selected_files(files: list[str]) -> list[str]:
@@ -243,8 +370,14 @@ def _sanitize_selected_files(files: list[str]) -> list[str]:
     return result
 
 
+def _build_context(history: list[str]) -> str:
+    """把前端传来的多轮对话整理成上下文文本(最多 6 条、总长 4000 字符)。"""
+    entries = [h.strip() for h in (history or []) if h and h.strip()]
+    return '\n'.join(entries[-6:])[:4000]
+
+
 @app.post("/api/chat")
-async def chat(question: str = Form(...), files: list[str] = Form(default=[])):
+async def chat(question: str = Form(...), files: list[str] = Form(default=[]), history: list[str] = Form(default=[])):
     """发送问题 → 流式输出（ffmpeg search+execute 进度 + chat 逐 token）"""
     if _init_state['status'] == 'running':
         return Response(
@@ -259,11 +392,6 @@ async def chat(question: str = Form(...), files: list[str] = Form(default=[])):
         )
 
     selected = _sanitize_selected_files(files)
-    if not selected:
-        return Response(
-            content=f"data: {json.dumps({'event': 'error', 'text': '请先选择要处理的文件，再发起需求'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
-            media_type="text/event-stream",
-        )
 
     logger.info('处理对话')
     logger.info(f'用户问题：{question[:200]}')
@@ -271,14 +399,23 @@ async def chat(question: str = Form(...), files: list[str] = Form(default=[])):
 
     from app.agents import agent_chat
 
+    context = _build_context(history)
+    job_id, job = _register_job()
     return StreamingResponse(
-        _event_stream(question, lambda q, p: exec_graph(q, p, files=selected), agent_chat, build_chat_prompt),
+        _event_stream(
+            question,
+            lambda q, p: exec_graph(q, p, files=selected, context=context,
+                                    stop_event=job['stop'], proc_box=job['proc']),
+            agent_chat,
+            build_chat_prompt,
+            job={'job_id': job_id, **job},
+        ),
         media_type="text/event-stream",
     )
 
 
 @app.post("/api/probe/chat")
-async def probe_chat(question: str = Form(...), files: list[str] = Form(default=[])):
+async def probe_chat(question: str = Form(...), files: list[str] = Form(default=[]), history: list[str] = Form(default=[])):
     """发送问题 → 流式输出（ffprobe search+execute 进度 + chat 逐 token）"""
     if _init_state['status'] == 'running':
         return Response(
@@ -293,11 +430,6 @@ async def probe_chat(question: str = Form(...), files: list[str] = Form(default=
         )
 
     selected = _sanitize_selected_files(files)
-    if not selected:
-        return Response(
-            content=f"data: {json.dumps({'event': 'error', 'text': '请先选择要处理的文件，再发起需求'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
-            media_type="text/event-stream",
-        )
 
     logger.info('处理 ffprobe 对话')
     logger.info(f'用户问题：{question[:200]}')
@@ -305,10 +437,30 @@ async def probe_chat(question: str = Form(...), files: list[str] = Form(default=
 
     from app.agents import agent_probe_chat
 
+    context = _build_context(history)
+    job_id, job = _register_job()
     return StreamingResponse(
-        _event_stream(question, lambda q, p: probe_exec_graph(q, p, files=selected), agent_probe_chat, build_probe_chat_prompt),
+        _event_stream(
+            question,
+            lambda q, p: probe_exec_graph(q, p, files=selected, context=context,
+                                          stop_event=job['stop'], proc_box=job['proc']),
+            agent_probe_chat,
+            build_probe_chat_prompt,
+            job={'job_id': job_id, **job},
+        ),
         media_type="text/event-stream",
     )
+
+
+@app.post("/api/chat/stop")
+async def stop_chat(body: dict):
+    """停止正在运行的任务：POST {"job_id": "..."}"""
+    job_id = (body or {}).get('job_id', '')
+    if not job_id:
+        raise HTTPException(status_code=400, detail="缺少 job_id")
+    stopped = _stop_job(job_id)
+    logger.info(f'停止任务 {job_id}：{"已停止" if stopped else "任务不存在或已结束"}')
+    return {"stopped": stopped}
 
 
 @app.get("/api/output")
@@ -327,11 +479,11 @@ async def delete_output(filename: str):
     """删除 download/ 中的已完成文件"""
     logger.info('删除已完成文件')
     logger.info(f'文件名：{filename}')
-    path = os.path.join(DOWNLOAD_DIR, filename)
-    if not os.path.exists(path):
+    path = _safe_path(DOWNLOAD_DIR, filename)
+    if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="文件不存在")
     os.remove(path)
-    return {"deleted": filename}
+    return {"deleted": os.path.basename(path)}
 
 
 @app.post("/api/output/delete")
@@ -340,10 +492,10 @@ async def batch_delete_output(body: dict):
     files = body.get("files", [])
     results = {"deleted": [], "not_found": []}
     for f in files:
-        path = os.path.join(DOWNLOAD_DIR, f)
-        if os.path.exists(path):
+        path = _safe_path(DOWNLOAD_DIR, f)
+        if path and os.path.isfile(path):
             os.remove(path)
-            results["deleted"].append(f)
+            results["deleted"].append(os.path.basename(path))
         else:
             results["not_found"].append(f)
     return results
@@ -356,9 +508,9 @@ async def batch_download_output(body: dict):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for f in files:
-            path = os.path.join(DOWNLOAD_DIR, f)
-            if os.path.exists(path):
-                zf.write(path, arcname=f)
+            path = _safe_path(DOWNLOAD_DIR, f)
+            if path and os.path.isfile(path):
+                zf.write(path, arcname=os.path.basename(path))
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",
@@ -371,8 +523,8 @@ async def get_output(filename: str):
     """返回 download/ 中的文件"""
     logger.info('下载已完成文件')
     logger.info(f'文件名：{filename}')
-    path = os.path.join(DOWNLOAD_DIR, filename)
-    if not os.path.exists(path):
+    path = _safe_path(DOWNLOAD_DIR, filename)
+    if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="文件不存在")
     return FileResponse(path)
 
@@ -393,8 +545,8 @@ async def get_uploaded(filename: str):
     """返回 upload/ 中的文件供下载"""
     logger.info('下载上传文件')
     logger.info(f'文件名：{filename}')
-    path = os.path.join(UPLOAD_DIR, filename)
-    if not os.path.exists(path):
+    path = _safe_path(UPLOAD_DIR, filename)
+    if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="文件不存在")
     return FileResponse(path)
 
@@ -404,12 +556,12 @@ async def delete_uploaded(filename: str):
     """删除 upload/ 中的文件"""
     logger.info('删除上传文件')
     logger.info(f'文件名：{filename}')
-    path = os.path.join(UPLOAD_DIR, filename)
-    if not os.path.exists(path):
+    path = _safe_path(UPLOAD_DIR, filename)
+    if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="文件不存在")
     os.remove(path)
-    logger.info(f'删除成功：{filename}')
-    return {"deleted": filename}
+    logger.info(f'删除成功：{os.path.basename(path)}')
+    return {"deleted": os.path.basename(path)}
 
 from fastapi.staticfiles import StaticFiles
 
@@ -429,7 +581,10 @@ async def get_llm_settings():
 
 @app.put("/api/settings/llm")
 async def update_llm_settings(body: dict):
-    update_model_config(body)
+    try:
+        update_model_config(body)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     cfg = get_model_config()
     _settings_store.update(cfg)
     return _settings_store

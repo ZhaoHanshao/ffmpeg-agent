@@ -1,6 +1,6 @@
 import os, json, logging
 from app.agents import ensure_agents, ensure_probe_agents
-from app.tools import split_command
+from app.tools import split_command, find_output_indexes
 from langgraph.graph import START, END, StateGraph, MessagesState
 from langchain.messages import ToolMessage, AnyMessage, AIMessage, HumanMessage
 
@@ -8,6 +8,10 @@ logger = logging.getLogger(__name__)
 
 MAX_SEARCH_COUNT = 5
 MAX_EXECUTE_COUNT = 3
+
+
+class GraphCancelled(Exception):
+    """用户主动停止任务(SSE 中断或 /api/chat/stop)。"""
 
 
 class state(MessagesState):
@@ -21,11 +25,22 @@ class state(MessagesState):
     execute_count: int = 0
     progress: list = None
     files: list = None
+    context: str = ''
+    stop_event: object = None
+    proc_box: object = None
+
+
+def _check_cancelled(state: state):
+    ev = state.get('stop_event')
+    if ev is not None and ev.is_set():
+        raise GraphCancelled('任务已被用户停止')
 
 
 def search(state: state):
     if not ensure_agents():
         raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
+
+    _check_cancelled(state)
 
     from app.agents import agent_search
 
@@ -43,10 +58,14 @@ def search(state: state):
     state['history'] = mes
     if state['flag'] or state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
         return state
+    # 多轮对话：把历史上下文作为参考消息前置(不要求其回答历史问题)
+    context_msgs = []
+    if state.get('context'):
+        context_msgs = [HumanMessage(content=f'对话历史（仅供参考，请结合当前问题理解用户意图）：\n{state["context"]}')]
     if state['command'] is not None:
-        res = agent_search.invoke({'messages': [*mes, HumanMessage(content=state['command_result'])]})
+        res = agent_search.invoke({'messages': [*context_msgs, *mes, HumanMessage(content=state.get('command_result', ''))]})
     else:
-        res = agent_search.invoke({'messages': mes})
+        res = agent_search.invoke({'messages': [*context_msgs, *mes]})
     state['result'] = res['messages'][-1].content
     state['search_count'] = state.get('search_count', 0) + 1
     return state
@@ -56,6 +75,8 @@ def execute(state: state):
     if not ensure_agents():
         raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
 
+    _check_cancelled(state)
+
     from app.agents import agent_execute
 
     if state.get('progress') is not None:
@@ -64,14 +85,22 @@ def execute(state: state):
     logger.info('执行命令')
     state['execute_count'] = state.get('execute_count', 0) + 1
     logger.info(f'执行次数：{state["execute_count"]}/{MAX_EXECUTE_COUNT}')
-    user_question = state['history'][0].content if state.get('history') else ''
+    history_msgs = state.get('history') or []
+    user_question = history_msgs[0].content if history_msgs else ''
     execute_prompt = (
         f'用户问题：{user_question}\n\n'
-        f'知识库检索结果：{state["result"]}'
+        f'知识库检索结果：{state.get("result", "")}'
     )
+    if state.get('context'):
+        execute_prompt += f'\n\n对话历史（仅供参考）：\n{state["context"]}'
     res = agent_execute.invoke(
         {'messages': [HumanMessage(content=execute_prompt)]},
-        config={'configurable': {'selected_files': state.get('files') or []}},
+        config={'configurable': {
+            'selected_files': state.get('files') or [],
+            'stop_event': state.get('stop_event'),
+            'proc': state.get('proc_box'),
+            'progress': state.get('progress'),
+        }},
     )
     for msg in reversed(res['messages']):
         if isinstance(msg, ToolMessage):
@@ -83,18 +112,23 @@ def execute(state: state):
                     state['command_result'] = data.get('command_result', '')
                     if data.get('flag') and data.get('command'):
                         parts = split_command(data['command'])
-                        for part in reversed(parts):
-                            if not part.startswith('-'):
-                                state['output_file'] = os.path.basename(part)
-                                break
-            except Exception:
-                pass
+                        idxs = find_output_indexes(parts)
+                        if idxs:
+                            state['output_file'] = os.path.basename(parts[idxs[-1]])
+            except Exception as e:
+                logger.warning(f'解析 execute 工具返回失败：{e}')
             break
     return state
 
 
 def which_continue_exec(state: state):
-    if state['flag']:
+    ev = state.get('stop_event')
+    if ev is not None and ev.is_set():
+        branch = END
+    elif not (state.get('files') or []):
+        # 纯知识问答(未选择文件)：检索后直接结束,不进入命令执行阶段
+        branch = END
+    elif state.get('flag', False):
         branch = END
     elif state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
         logger.info(f'执行次数已达上限（{MAX_EXECUTE_COUNT} 次），强制结束')
@@ -116,12 +150,14 @@ exec_workflow.add_conditional_edges(
     which_continue_exec,
     {END: END, 'execute': 'execute'},
 )
+# 模块加载时编译一次,避免每个请求重复 compile()
+_compiled_exec = exec_workflow.compile()
 
 
-def exec_graph(question: str, progress: list = None, files: list = None) -> dict:
+def exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
+               stop_event=None, proc_box=None) -> dict:
     logger.info(f'开始执行，用户问题：{question}')
-    compiled = exec_workflow.compile()
-    result = compiled.invoke({
+    result = _compiled_exec.invoke({
         "messages": [HumanMessage(content=question)],
         "command": None,
         "result": "",
@@ -133,17 +169,23 @@ def exec_graph(question: str, progress: list = None, files: list = None) -> dict
         "execute_count": 0,
         "progress": progress,
         "files": files or [],
+        "context": context or '',
+        "stop_event": stop_event,
+        "proc_box": proc_box,
     })
     return result
 
 
 def build_chat_prompt(state: dict) -> str:
     """根据执行状态构建 chat agent 的输入提示。"""
-    user_question = state['history'][0].content if state.get('history') else ''
+    history_msgs = state.get('history') or []
+    user_question = history_msgs[0].content if history_msgs else ''
     prompt = (
         f'用户问题：{user_question}\n\n'
         f'知识库检索结果：{state.get("result", "")}\n'
     )
+    if state.get('context'):
+        prompt += f'\n对话历史（仅供参考）：\n{state["context"]}'
     if state.get('command'):
         prompt += f'\n执行的命令：{state["command"]}'
     if state.get('command_result'):
@@ -161,6 +203,8 @@ def probe_search(state: state):
     if not ensure_probe_agents():
         raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
 
+    _check_cancelled(state)
+
     from app.agents import agent_probe_search
 
     if state.get('progress') is not None:
@@ -177,10 +221,13 @@ def probe_search(state: state):
     state['history'] = mes
     if state['flag'] or state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
         return state
+    context_msgs = []
+    if state.get('context'):
+        context_msgs = [HumanMessage(content=f'对话历史（仅供参考，请结合当前问题理解用户意图）：\n{state["context"]}')]
     if state['command'] is not None:
-        res = agent_probe_search.invoke({'messages': [*mes, HumanMessage(content=state['command_result'])]})
+        res = agent_probe_search.invoke({'messages': [*context_msgs, *mes, HumanMessage(content=state.get('command_result', ''))]})
     else:
-        res = agent_probe_search.invoke({'messages': mes})
+        res = agent_probe_search.invoke({'messages': [*context_msgs, *mes]})
     state['result'] = res['messages'][-1].content
     state['search_count'] = state.get('search_count', 0) + 1
     return state
@@ -190,6 +237,8 @@ def probe_execute(state: state):
     if not ensure_probe_agents():
         raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
 
+    _check_cancelled(state)
+
     from app.agents import agent_probe_execute
 
     if state.get('progress') is not None:
@@ -198,14 +247,21 @@ def probe_execute(state: state):
     logger.info('执行 ffprobe 命令')
     state['execute_count'] = state.get('execute_count', 0) + 1
     logger.info(f'执行次数：{state["execute_count"]}/{MAX_EXECUTE_COUNT}')
-    user_question = state['history'][0].content if state.get('history') else ''
+    history_msgs = state.get('history') or []
+    user_question = history_msgs[0].content if history_msgs else ''
     execute_prompt = (
         f'用户问题：{user_question}\n\n'
-        f'知识库检索结果：{state["result"]}'
+        f'知识库检索结果：{state.get("result", "")}'
     )
+    if state.get('context'):
+        execute_prompt += f'\n\n对话历史（仅供参考）：\n{state["context"]}'
     res = agent_probe_execute.invoke(
         {'messages': [HumanMessage(content=execute_prompt)]},
-        config={'configurable': {'selected_files': state.get('files') or []}},
+        config={'configurable': {
+            'selected_files': state.get('files') or [],
+            'stop_event': state.get('stop_event'),
+            'proc': state.get('proc_box'),
+        }},
     )
     for msg in reversed(res['messages']):
         if isinstance(msg, ToolMessage):
@@ -215,8 +271,8 @@ def probe_execute(state: state):
                     state['command'] = data.get('command', state.get('command', ''))
                     state['flag'] = data.get('flag', False)
                     state['command_result'] = data.get('command_result', '')
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f'解析 probe_execute 工具返回失败：{e}')
             break
     return state
 
@@ -231,12 +287,14 @@ probe_exec_workflow.add_conditional_edges(
     which_continue_exec,
     {END: END, 'execute': 'execute'},
 )
+# 模块加载时编译一次,避免每个请求重复 compile()
+_compiled_probe_exec = probe_exec_workflow.compile()
 
 
-def probe_exec_graph(question: str, progress: list = None, files: list = None) -> dict:
+def probe_exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
+                     stop_event=None, proc_box=None) -> dict:
     logger.info(f'开始执行 ffprobe 任务，用户问题：{question}')
-    compiled = probe_exec_workflow.compile()
-    result = compiled.invoke({
+    result = _compiled_probe_exec.invoke({
         "messages": [HumanMessage(content=question)],
         "command": None,
         "result": "",
@@ -248,17 +306,23 @@ def probe_exec_graph(question: str, progress: list = None, files: list = None) -
         "execute_count": 0,
         "progress": progress,
         "files": files or [],
+        "context": context or '',
+        "stop_event": stop_event,
+        "proc_box": proc_box,
     })
     return result
 
 
 def build_probe_chat_prompt(state: dict) -> str:
     """根据 ffprobe 执行状态构建 chat agent 的输入提示。"""
-    user_question = state['history'][0].content if state.get('history') else ''
+    history_msgs = state.get('history') or []
+    user_question = history_msgs[0].content if history_msgs else ''
     prompt = (
         f'用户问题：{user_question}\n\n'
         f'知识库检索结果：{state.get("result", "")}\n'
     )
+    if state.get('context'):
+        prompt += f'\n对话历史（仅供参考）：\n{state["context"]}'
     if state.get('command'):
         prompt += f'\n执行的命令：{state["command"]}'
     if state.get('command_result'):

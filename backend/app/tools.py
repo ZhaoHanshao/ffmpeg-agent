@@ -2,7 +2,7 @@ from langchain.tools import tool
 from langchain_core.runnables import RunnableConfig
 from app.db_search import get_text, get_probe_text
 from dotenv import load_dotenv
-import os, sys, subprocess, shlex, logging
+import os, sys, subprocess, shlex, logging, time, tempfile, threading
 
 load_dotenv()
 
@@ -10,6 +10,61 @@ logger = logging.getLogger(__name__)
 
 DOWNLOAD = os.getenv('DOWNLOAD', 'backend/download')
 UPLOAD = os.getenv('UPLOAD', 'backend/upload')
+
+# 串行化"清空下载目录 + 执行命令"整段临界区，避免并发请求互相删除对方的输入/输出文件
+_execute_lock = threading.Lock()
+
+# 单条命令最长执行时间(秒),超时强制终止,防止失控命令占死线程
+try:
+    EXEC_TIMEOUT = int(os.getenv('FFMPEG_TIMEOUT', '1800'))
+except ValueError:
+    EXEC_TIMEOUT = 1800
+
+# 允许作为 -i 输入的 lavfi 虚拟源(无真实文件路径)
+VIRTUAL_SOURCES = {
+    'lavfi', 'testsrc', 'testsrc2', 'smptebars', 'smptehdbars', 'color', 'nullsrc',
+    'rgbtestsrc', 'yuvtestsrc', 'sine', 'anoisesrc', 'aevalsrc', 'anullsrc',
+    'allrgb', 'allyuv', 'pal75bars', 'pal100bars', 'gradients', 'life',
+    'cellauto', 'mandelbrot', 'mptestsrc', 'haldclutsrc', 'flite',
+}
+
+# 取值型选项(后面跟一个值),用于区分"输出文件"与"选项值",避免误重写 -t 5 / -map 0:v 等
+VALUE_OPTS = {
+    '-i', '-f', '-t', '-to', '-ss', '-itsoffset', '-map', '-c', '-c:v', '-c:a', '-c:s', '-c:d',
+    '-codec', '-codec:v', '-codec:a', '-b', '-b:v', '-b:a', '-minrate', '-maxrate', '-bufsize',
+    '-r', '-s', '-aspect', '-vf', '-af', '-filter', '-filter:v', '-filter:a', '-filter_complex',
+    '-lavfi', '-vframes', '-frames:v', '-frames:a', '-q', '-qscale', '-q:v', '-q:a', '-crf',
+    '-preset', '-tune', '-profile', '-profile:v', '-profile:a', '-level', '-pix_fmt', '-ac',
+    '-ar', '-acodec', '-vcodec', '-scodec', '-vol', '-metadata', '-tag', '-tag:v', '-tag:a',
+    '-movflags', '-fps_mode', '-fpsmax', '-g', '-keyint_min', '-sc_threshold', '-threads',
+    '-x264-params', '-x265-params', '-pass', '-passlogfile', '-max_muxing_queue_size',
+    '-start_number', '-vsync', '-async', '-video_size', '-framerate', '-sample_fmt',
+    '-ch_layout', '-channel_layout', '-loglevel', '-progress', '-timelimit', '-duration',
+    '-muxpreload', '-muxdelay', '-analyzeduration', '-probesize', '-target', '-vtag', '-atag',
+    '-stream_loop', '-loop', '-rtsp_transport', '-user_agent', '-headers',
+}
+
+
+def find_output_indexes(parts: list) -> list:
+    """解析 ffmpeg 参数,返回未被取值型选项消费的裸参数下标(即输出文件位置)。
+
+    修复旧启发式(取"最后一个非 - 开头参数")的缺陷：-t 5 / -map 0:v / -i in.mp4
+    等选项值不再被误判为输出。
+    """
+    outputs = []
+    consume_next = False
+    for i, p in enumerate(parts):
+        if i == 0:
+            continue  # 跳过命令名
+        if consume_next:
+            consume_next = False
+            continue
+        if p.startswith('-'):
+            if p in VALUE_OPTS:
+                consume_next = True
+            continue
+        outputs.append(i)
+    return outputs
 
 
 def _is_frozen() -> bool:
@@ -48,6 +103,135 @@ def split_command(cmd: str) -> list:
     return result
 
 
+def _validate_input(value: str) -> bool:
+    """校验 -i 输入源：
+    - 虚拟源(lavfi/testsrc/color 等)放行
+    - 网络协议(http/https/rtmp...)一律拒绝(防 SSRF)
+    - 本地路径必须落在 UPLOAD/DOWNLOAD 目录内(防任意文件读取)
+    """
+    v = (value or '').strip()
+    if not v:
+        return False
+    source = v.split('=')[0].split(':')[0]
+    if source in VIRTUAL_SOURCES:
+        return True
+    if '://' in v:
+        if v.startswith('file://'):
+            v = v[len('file://'):]
+        else:
+            return False
+    try:
+        real = os.path.realpath(os.path.join(os.getcwd(), v))
+    except Exception:
+        return False
+    for base in (os.path.realpath(UPLOAD), os.path.realpath(DOWNLOAD)):
+        if real == base or real.startswith(base + os.sep):
+            return True
+    return False
+
+
+def _check_inputs(parts: list) -> list:
+    """返回所有非法输入源列表(空列表表示全部合法)。"""
+    denied = []
+    for i, p in enumerate(parts):
+        if p == '-i' and i + 1 < len(parts):
+            if not _validate_input(parts[i + 1]):
+                denied.append(parts[i + 1])
+    return denied
+
+
+def _fmt_time(seconds: float) -> str:
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m:02d}:{sec:02d}'
+
+
+def _first_input_file(run_parts: list):
+    """返回第一个 -i 参数指向的本地文件路径(用于探测时长),无则 None。"""
+    for i, p in enumerate(run_parts):
+        if p == '-i' and i + 1 < len(run_parts):
+            val = run_parts[i + 1]
+            if val in VIRTUAL_SOURCES or val.split('=')[0].split(':')[0] in VIRTUAL_SOURCES or '://' in val:
+                continue
+            path = os.path.join(os.getcwd(), val)
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+def _probe_duration(path: str) -> float:
+    """用 ffprobe 快速读取媒体时长(秒),失败返回 0。"""
+    try:
+        probe = ffmpeg_bin('ffprobe')
+        args = [probe, '-v', 'error', '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1', path]
+        with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
+            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr)
+            proc.communicate(timeout=15)
+            fout.seek(0)
+            text = fout.read().decode(errors='replace').strip()
+            return float(text) if text else 0.0
+    except Exception:
+        return 0.0
+
+
+def _run_binary(run_parts: list, timeout: int, label: str, stop_event=None, proc_box=None, progress_cb=None):
+    """执行 ffmpeg/ffprobe 并返回 (returncode, stdout_str, stderr_str)。
+    - stdin 指向空设备,避免 ffmpeg 的 Overwrite 等交互提示阻塞
+    - 输出写入临时文件(避免管道写满死锁),轮询等待,超时/收到停止信号时强制 kill
+    - progress_cb 提供时,增量读取 stdout(ffmpeg -progress pipe:1 输出)回调给上层
+    """
+    with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
+        proc = subprocess.Popen(args=run_parts, stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr)
+        if proc_box is not None:
+            proc_box[0] = proc
+        try:
+            deadline = time.monotonic() + timeout
+            last_pos = 0
+            while proc.poll() is None:
+                if stop_event is not None and stop_event.is_set():
+                    proc.kill()
+                    proc.wait()
+                    raise InterruptedError(f'{label} 已被用户停止')
+                if time.monotonic() > deadline:
+                    proc.kill()
+                    proc.wait()
+                    ferr.seek(0)
+                    err_tail = ferr.read().decode(errors='replace')[-2000:]
+                    raise TimeoutError(f'{label} 执行超过 {timeout} 秒，已强制终止。{err_tail}')
+                if progress_cb is not None:
+                    fout.seek(0, os.SEEK_END)
+                    end = fout.tell()
+                    if end > last_pos:
+                        fout.seek(last_pos)
+                        progress_cb(fout.read(end - last_pos).decode(errors='replace'))
+                        last_pos = end
+                time.sleep(0.2)
+            fout.seek(0)
+            ferr.seek(0)
+            return proc.returncode, fout.read().decode(errors='replace'), ferr.read().decode(errors='replace')
+        finally:
+            if proc_box is not None:
+                proc_box[0] = None
+
+
+def _format_docs(result) -> list:
+    """把检索结果格式化成带标题上下文的文本;查询失败返回错误说明。"""
+    if isinstance(result, str):
+        return [result]
+    contents = []
+    for i, item in enumerate(result, 1):
+        if not isinstance(item, dict):
+            contents.append(f'来源[{i}]，{item}')
+            continue
+        title = (item.get('title') or '').strip()
+        content = (item.get('content') or '').strip()
+        header = f'来源[{i}]（{title}）' if title else f'来源[{i}]'
+        contents.append(f'{header}，{content}')
+    return contents
+
+
 @tool
 def get_command(squry: str):
     """
@@ -57,12 +241,7 @@ def get_command(squry: str):
     """
     logger.info('查询知识库')
     logger.info(f'查询内容：{squry[:200]}')
-    result = get_text(squry)
-    contents = []
-    for i, doc in enumerate(result, 1):
-        content = f'来源[{i}]，{doc}'
-        contents.append(content)
-    return contents
+    return _format_docs(get_text(squry))
 
 
 @tool
@@ -74,12 +253,7 @@ def get_probe_command(squry: str):
     """
     logger.info('查询 ffprobe 知识库')
     logger.info(f'查询内容：{squry[:200]}')
-    result = get_probe_text(squry)
-    contents = []
-    for i, doc in enumerate(result, 1):
-        content = f'来源[{i}]，{doc}'
-        contents.append(content)
-    return contents
+    return _format_docs(get_probe_text(squry))
 
 
 @tool
@@ -125,57 +299,107 @@ def execute_command(command: str, config: RunnableConfig):
             'command_result': f'拒绝执行非 ffmpeg 命令：{cmd_name}。请直接使用 ffmpeg 命令完成任务。',
         }
 
-    # 将输出路径强制重写到 DOWNLOAD 目录
+    # 将输出路径强制重写到 DOWNLOAD 目录(按参数语法解析,支持多输出)
     parts = split_command(command)
-    output_idx = None
-    for i in range(len(parts) - 1, -1, -1):
-        if i == 0:
-            continue  # 跳过命令名
-        if parts[i].startswith('-'):
-            continue  # 跳过标志参数
-        output_idx = i
-        break
-
-    if output_idx is not None:
-        original = parts[output_idx]
-        # 仅当路径尚未指向 DOWNLOAD 时才重写
-        if DOWNLOAD not in original and DOWNLOAD not in os.path.dirname(original):
-            parts[output_idx] = os.path.join(DOWNLOAD, os.path.basename(original))
+    output_indexes = find_output_indexes(parts)
+    if output_indexes:
+        rewritten = False
+        for idx in output_indexes:
+            original = parts[idx]
+            # 仅当路径尚未指向 DOWNLOAD 时才重写
+            if DOWNLOAD not in original and DOWNLOAD not in os.path.dirname(original):
+                parts[idx] = os.path.join(DOWNLOAD, os.path.basename(original))
+                rewritten = True
+        if rewritten:
             command = subprocess.list2cmdline(parts)
             logger.info(f'输出路径已重写至 {DOWNLOAD}/')
 
     logger.info(f'执行命令：{command}')
     os.makedirs(DOWNLOAD, exist_ok=True)
 
-    # 清空下载目录，防止 ffmpeg 阻塞在 Overwrite? [y/N] 提示
-    # 本次选中的输入文件（可能来自下载目录）需要保留，不能被清掉
-    protected = {os.path.normpath(p) for p in (((config or {}).get('configurable') or {}).get('selected_files') or [])}
-    if os.path.exists(DOWNLOAD):
-        for f in os.listdir(DOWNLOAD):
-            fp = os.path.join(DOWNLOAD, f)
-            if os.path.isfile(fp) and os.path.normpath(fp) not in protected:
-                os.remove(fp)
+    conf = ((config or {}).get('configurable') or {})
+    stop_event = conf.get('stop_event')
+    proc_box = conf.get('proc')
 
-    try:
-        run_parts = split_command(command)
-        run_parts[0] = ffmpeg_bin('ffmpeg')
-        exit_code = subprocess.run(args=run_parts, capture_output=True)
-        if exit_code.returncode == 0:
-            return {'command': command, 'flag': True, 'command_result': f'{command} 执行成功'}
-        else:
+    with _execute_lock:
+        try:
+            run_parts = split_command(command)
+            # 输入源安全校验：只允许 UPLOAD/DOWNLOAD 内的文件或 lavfi 虚拟源
+            denied = _check_inputs(run_parts)
+            if denied:
+                return {
+                    'command': command,
+                    'command_result': '拒绝执行：输入源不在允许目录内或使用了被禁止的网络协议：'
+                                     + '、'.join(denied) + '。请只使用 get_files 返回的文件。',
+                }
+            # 注入 -y 静默覆盖同名输出,替代"每次清空下载目录"的粗暴做法(输出文件可跨任务保留)
+            if '-y' not in run_parts and '-n' not in run_parts:
+                run_parts.insert(1, '-y')
+            # 附加进度输出:ffmpeg -progress pipe:1 写入 stdout(临时文件),解析后实时回传前端
+            outputs = find_output_indexes(run_parts)
+            has_stdout_output = any(run_parts[i] == '-' for i in outputs)
+            if '-progress' not in run_parts and not has_stdout_output:
+                run_parts[1:1] = ['-progress', 'pipe:1', '-nostats']
+
+            # 构建进度回调(带节流,2 秒内不重复上报)
+            progress_list = conf.get('progress')
+            duration = _probe_duration(_first_input_file(run_parts)) if progress_list else 0.0
+            last_report = {'t': 0.0}
+
+            def _report_progress(chunk: str):
+                if progress_list is None:
+                    return
+                ms = None
+                for line in chunk.splitlines():
+                    if line.startswith('out_time_ms='):
+                        try:
+                            ms = int(line.split('=', 1)[1])
+                        except ValueError:
+                            pass
+                    elif line.startswith('out_time_us='):
+                        try:
+                            ms = int(line.split('=', 1)[1]) // 1000
+                        except ValueError:
+                            pass
+                if ms is None or ms - last_report['t'] < 2000:
+                    return
+                last_report['t'] = ms
+                secs = ms / 1000
+                if duration > 0:
+                    pct = min(99, int(secs / duration * 100))
+                    progress_list.append(f'转码中 {pct}%（{_fmt_time(secs)} / {_fmt_time(duration)}）')
+                else:
+                    progress_list.append(f'转码中 已处理 {_fmt_time(secs)}')
+
+            run_parts[0] = ffmpeg_bin('ffmpeg')
+            returncode, _, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffmpeg', stop_event, proc_box,
+                                                _report_progress if progress_list is not None else None)
+            if returncode == 0:
+                return {'command': command, 'flag': True, 'command_result': f'{command} 执行成功'}
+            else:
+                return {
+                    'command': command,
+                    'command_result': f'{command} 执行失败：{stderr[-2000:]}',
+                }
+        except OSError as e:
             return {
                 'command': command,
-                'command_result': f'{command} 执行失败：{exit_code.stderr.decode(errors="replace")}',
+                'command_result': f'命令执行异常：{e}',
             }
-    except OSError as e:
-        return {
-            'command': command,
-            'command_result': f'命令执行异常：{e}',
-        }
+        except TimeoutError as e:
+            return {
+                'command': command,
+                'command_result': f'命令执行超时：{e}',
+            }
+        except InterruptedError as e:
+            return {
+                'command': command,
+                'command_result': f'{e}',
+            }
 
 
 @tool
-def execute_probe_command(command: str):
+def execute_probe_command(command: str, config: RunnableConfig):
     """
     执行ffprobe命令（只读分析工具，结果输出到标准输出）
     参数值：
@@ -194,12 +418,24 @@ def execute_probe_command(command: str):
             'command_result': f'拒绝执行非 ffprobe 命令：{cmd_name}。请直接使用 ffprobe 命令完成任务。',
         }
 
+    conf = ((config or {}).get('configurable') or {})
+    stop_event = conf.get('stop_event')
+    proc_box = conf.get('proc')
+
     try:
         run_parts = split_command(command)
+        # 输入源安全校验(与 ffmpeg 相同)：防 SSRF 与任意文件读取
+        denied = _check_inputs(run_parts)
+        if denied:
+            return {
+                'command': command,
+                'command_result': '拒绝执行：输入源不在允许目录内或使用了被禁止的网络协议：'
+                                 + '、'.join(denied) + '。请只使用 get_files 返回的文件。',
+            }
         run_parts[0] = ffmpeg_bin('ffprobe')
-        proc = subprocess.run(args=run_parts, capture_output=True)
-        if proc.returncode == 0:
-            output = proc.stdout.decode(errors='replace').strip()
+        returncode, stdout, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffprobe', stop_event, proc_box)
+        if returncode == 0:
+            output = stdout.strip()
             return {
                 'command': command,
                 'flag': True,
@@ -208,10 +444,20 @@ def execute_probe_command(command: str):
         else:
             return {
                 'command': command,
-                'command_result': f'{command} 执行失败：{proc.stderr.decode(errors="replace")}',
+                'command_result': f'{command} 执行失败：{stderr[-2000:]}',
             }
     except OSError as e:
         return {
             'command': command,
             'command_result': f'命令执行异常：{e}',
+        }
+    except TimeoutError as e:
+        return {
+            'command': command,
+            'command_result': f'命令执行超时：{e}',
+        }
+    except InterruptedError as e:
+        return {
+            'command': command,
+            'command_result': f'{e}',
         }

@@ -191,7 +191,7 @@ onUnmounted(() => {
           <div v-if="!messages.length" class="empty-chat">
             <div class="empty-icon">💬</div>
             <p>{{ mode === 'ffprobe' ? '选择文件后，告诉我你想查看文件的哪些信息' : '选择文件后，告诉我你想对文件做什么' }}</p>
-            <p v-if="!hasFiles" class="empty-hint">在左侧面板点击 ＋ 将文件加入工作区，再输入需求</p>
+            <p v-if="!hasFiles" class="empty-hint">在左侧面板点击 ＋ 将文件加入工作区，再输入需求；不选文件也可以直接提问 FFmpeg/FFprobe 知识</p>
             <p class="examples">
               <button v-if="mode === 'ffprobe'" class="example-chip" @click="useExample('查看视频的分辨率和编码')">查看视频的分辨率和编码</button>
               <button v-if="mode === 'ffprobe'" class="example-chip" @click="useExample('查看音频采样率')">查看音频采样率</button>

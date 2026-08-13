@@ -1,5 +1,5 @@
 import { ref, reactive, computed, nextTick } from 'vue'
-import { API_BASE } from '../api'
+import { API_BASE, authHeaders } from '../api'
 
 const NEAR_BOTTOM_THRESHOLD = 120
 
@@ -58,6 +58,7 @@ export function useChat(mode) {
 
     const ac = new AbortController()
     controller = ac
+    let jobId = ''
     let lastStatus = ''
     const endpoint = mode.value === 'ffprobe' ? '/probe/chat' : '/chat'
 
@@ -65,10 +66,17 @@ export function useChat(mode) {
       const form = new FormData()
       form.append('question', text)
       for (const f of files) form.append('files', `${f.src === 'output' ? 'download' : 'upload'}:${f.name}`)
+      // 多轮记忆：把最近 6 条历史(不含当前提问与占位回复)随请求发给后端
+      const roleName = { user: '用户', ai: '助手', system: '系统' }
+      for (const m of messages.value.slice(0, -2).slice(-6)) {
+        const body = (m.text || '').trim().replace(/\s+/g, ' ').slice(0, 500)
+        if (body) form.append('history', `${roleName[m.role] || '消息'}: ${body}`)
+      }
       const res = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         body: form,
         signal: ac.signal,
+        headers: authHeaders(),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
@@ -89,6 +97,14 @@ export function useChat(mode) {
           try {
             const data = JSON.parse(trimmed.slice(6))
             if (data.event === 'done') continue
+            if (data.event === 'job') {
+              jobId = data.job_id || ''
+              continue
+            }
+            if (data.event === 'cancelled') {
+              reply.text = reply.text || '⏹ 已停止'
+              continue
+            }
             if (data.event === 'status') {
               lastStatus = data.text
               reply.text = `⏳ ${data.text}`
@@ -124,6 +140,14 @@ export function useChat(mode) {
   }
 
   function stopChat() {
+    // 通知后端真实终止任务(杀掉 ffmpeg/ffprobe 进程、停止 graph),再断开流
+    if (jobId) {
+      fetch(`${API_BASE}/chat/stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ job_id: jobId }),
+      }).catch(() => {})
+    }
     controller?.abort()
   }
 
