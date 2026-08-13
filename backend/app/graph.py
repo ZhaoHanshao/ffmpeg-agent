@@ -63,7 +63,7 @@ def search(state: state):
     if state.get('context'):
         context_msgs = [HumanMessage(content=f'对话历史（仅供参考，请结合当前问题理解用户意图）：\n{state["context"]}')]
     if state['command'] is not None:
-        res = agent_search.invoke({'messages': [*context_msgs, *mes, HumanMessage(content=state['command_result'])]})
+        res = agent_search.invoke({'messages': [*context_msgs, *mes, HumanMessage(content=state.get('command_result', ''))]})
     else:
         res = agent_search.invoke({'messages': [*context_msgs, *mes]})
     state['result'] = res['messages'][-1].content
@@ -85,10 +85,11 @@ def execute(state: state):
     logger.info('执行命令')
     state['execute_count'] = state.get('execute_count', 0) + 1
     logger.info(f'执行次数：{state["execute_count"]}/{MAX_EXECUTE_COUNT}')
-    user_question = state['history'][0].content if state.get('history') else ''
+    history_msgs = state.get('history') or []
+    user_question = history_msgs[0].content if history_msgs else ''
     execute_prompt = (
         f'用户问题：{user_question}\n\n'
-        f'知识库检索结果：{state["result"]}'
+        f'知识库检索结果：{state.get("result", "")}'
     )
     if state.get('context'):
         execute_prompt += f'\n\n对话历史（仅供参考）：\n{state["context"]}'
@@ -113,8 +114,8 @@ def execute(state: state):
                         idxs = find_output_indexes(parts)
                         if idxs:
                             state['output_file'] = os.path.basename(parts[idxs[-1]])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f'解析 execute 工具返回失败：{e}')
             break
     return state
 
@@ -123,7 +124,7 @@ def which_continue_exec(state: state):
     ev = state.get('stop_event')
     if ev is not None and ev.is_set():
         branch = END
-    elif state['flag']:
+    elif state.get('flag', False):
         branch = END
     elif state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
         logger.info(f'执行次数已达上限（{MAX_EXECUTE_COUNT} 次），强制结束')
@@ -172,7 +173,8 @@ def exec_graph(question: str, progress: list = None, files: list = None, context
 
 def build_chat_prompt(state: dict) -> str:
     """根据执行状态构建 chat agent 的输入提示。"""
-    user_question = state['history'][0].content if state.get('history') else ''
+    history_msgs = state.get('history') or []
+    user_question = history_msgs[0].content if history_msgs else ''
     prompt = (
         f'用户问题：{user_question}\n\n'
         f'知识库检索结果：{state.get("result", "")}\n'
@@ -218,7 +220,7 @@ def probe_search(state: state):
     if state.get('context'):
         context_msgs = [HumanMessage(content=f'对话历史（仅供参考，请结合当前问题理解用户意图）：\n{state["context"]}')]
     if state['command'] is not None:
-        res = agent_probe_search.invoke({'messages': [*context_msgs, *mes, HumanMessage(content=state['command_result'])]})
+        res = agent_probe_search.invoke({'messages': [*context_msgs, *mes, HumanMessage(content=state.get('command_result', ''))]})
     else:
         res = agent_probe_search.invoke({'messages': [*context_msgs, *mes]})
     state['result'] = res['messages'][-1].content
@@ -240,10 +242,11 @@ def probe_execute(state: state):
     logger.info('执行 ffprobe 命令')
     state['execute_count'] = state.get('execute_count', 0) + 1
     logger.info(f'执行次数：{state["execute_count"]}/{MAX_EXECUTE_COUNT}')
-    user_question = state['history'][0].content if state.get('history') else ''
+    history_msgs = state.get('history') or []
+    user_question = history_msgs[0].content if history_msgs else ''
     execute_prompt = (
         f'用户问题：{user_question}\n\n'
-        f'知识库检索结果：{state["result"]}'
+        f'知识库检索结果：{state.get("result", "")}'
     )
     if state.get('context'):
         execute_prompt += f'\n\n对话历史（仅供参考）：\n{state["context"]}'
@@ -263,8 +266,8 @@ def probe_execute(state: state):
                     state['command'] = data.get('command', state.get('command', ''))
                     state['flag'] = data.get('flag', False)
                     state['command_result'] = data.get('command_result', '')
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f'解析 probe_execute 工具返回失败：{e}')
             break
     return state
 
@@ -306,7 +309,8 @@ def probe_exec_graph(question: str, progress: list = None, files: list = None, c
 
 def build_probe_chat_prompt(state: dict) -> str:
     """根据 ffprobe 执行状态构建 chat agent 的输入提示。"""
-    user_question = state['history'][0].content if state.get('history') else ''
+    history_msgs = state.get('history') or []
+    user_question = history_msgs[0].content if history_msgs else ''
     prompt = (
         f'用户问题：{user_question}\n\n'
         f'知识库检索结果：{state.get("result", "")}\n'
