@@ -2,7 +2,7 @@ from langchain.tools import tool
 from langchain_core.runnables import RunnableConfig
 from app.db_search import get_text, get_probe_text
 from dotenv import load_dotenv
-import os, sys, subprocess, shlex, logging, time, tempfile
+import os, sys, subprocess, shlex, logging, time, tempfile, threading
 
 load_dotenv()
 
@@ -10,6 +10,9 @@ logger = logging.getLogger(__name__)
 
 DOWNLOAD = os.getenv('DOWNLOAD', 'backend/download')
 UPLOAD = os.getenv('UPLOAD', 'backend/upload')
+
+# 串行化"清空下载目录 + 执行命令"整段临界区，避免并发请求互相删除对方的输入/输出文件
+_execute_lock = threading.Lock()
 
 # 单条命令最长执行时间(秒),超时强制终止,防止失控命令占死线程
 try:
@@ -219,44 +222,45 @@ def execute_command(command: str, config: RunnableConfig):
     logger.info(f'执行命令：{command}')
     os.makedirs(DOWNLOAD, exist_ok=True)
 
-    # 清空下载目录，防止 ffmpeg 阻塞在 Overwrite? [y/N] 提示
-    # 本次选中的输入文件（可能来自下载目录）需要保留，不能被清掉
-    protected = {os.path.normpath(p) for p in (((config or {}).get('configurable') or {}).get('selected_files') or [])}
-    if os.path.exists(DOWNLOAD):
-        for f in os.listdir(DOWNLOAD):
-            fp = os.path.join(DOWNLOAD, f)
-            if os.path.isfile(fp) and os.path.normpath(fp) not in protected:
-                os.remove(fp)
+    with _execute_lock:
+        # 清空下载目录，防止 ffmpeg 阻塞在 Overwrite? [y/N] 提示
+        # 本次选中的输入文件（可能来自下载目录）需要保留，不能被清掉
+        protected = {os.path.normpath(p) for p in (((config or {}).get('configurable') or {}).get('selected_files') or [])}
+        if os.path.exists(DOWNLOAD):
+            for f in os.listdir(DOWNLOAD):
+                fp = os.path.join(DOWNLOAD, f)
+                if os.path.isfile(fp) and os.path.normpath(fp) not in protected:
+                    os.remove(fp)
 
-    try:
-        run_parts = split_command(command)
-        # 输入源安全校验：只允许 UPLOAD/DOWNLOAD 内的文件或 lavfi 虚拟源
-        denied = _check_inputs(run_parts)
-        if denied:
+        try:
+            run_parts = split_command(command)
+            # 输入源安全校验：只允许 UPLOAD/DOWNLOAD 内的文件或 lavfi 虚拟源
+            denied = _check_inputs(run_parts)
+            if denied:
+                return {
+                    'command': command,
+                    'command_result': '拒绝执行：输入源不在允许目录内或使用了被禁止的网络协议：'
+                                     + '、'.join(denied) + '。请只使用 get_files 返回的文件。',
+                }
+            run_parts[0] = ffmpeg_bin('ffmpeg')
+            returncode, _, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffmpeg')
+            if returncode == 0:
+                return {'command': command, 'flag': True, 'command_result': f'{command} 执行成功'}
+            else:
+                return {
+                    'command': command,
+                    'command_result': f'{command} 执行失败：{stderr[-2000:]}',
+                }
+        except OSError as e:
             return {
                 'command': command,
-                'command_result': '拒绝执行：输入源不在允许目录内或使用了被禁止的网络协议：'
-                                 + '、'.join(denied) + '。请只使用 get_files 返回的文件。',
+                'command_result': f'命令执行异常：{e}',
             }
-        run_parts[0] = ffmpeg_bin('ffmpeg')
-        returncode, _, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffmpeg')
-        if returncode == 0:
-            return {'command': command, 'flag': True, 'command_result': f'{command} 执行成功'}
-        else:
+        except TimeoutError as e:
             return {
                 'command': command,
-                'command_result': f'{command} 执行失败：{stderr[-2000:]}',
+                'command_result': f'命令执行超时：{e}',
             }
-    except OSError as e:
-        return {
-            'command': command,
-            'command_result': f'命令执行异常：{e}',
-        }
-    except TimeoutError as e:
-        return {
-            'command': command,
-            'command_result': f'命令执行超时：{e}',
-        }
 
 
 @tool
