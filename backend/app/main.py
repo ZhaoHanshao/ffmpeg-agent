@@ -70,6 +70,13 @@ load_dotenv()
 UPLOAD_DIR = os.getenv('UPLOAD', 'backend/upload')
 DOWNLOAD_DIR = os.getenv('DOWNLOAD', 'backend/download')
 
+# 上传限制：单文件最大体积(MB,0=不限制)与可选扩展名白名单(逗号分隔,空=不限制)
+try:
+    MAX_UPLOAD_SIZE = int(os.getenv('MAX_UPLOAD_SIZE_MB', '2048') or 0) * 1024 * 1024
+except ValueError:
+    MAX_UPLOAD_SIZE = 0
+UPLOAD_EXT_WHITELIST = {e.lower().lstrip('.') for e in os.getenv('UPLOAD_EXT_WHITELIST', '').split(',') if e.strip()}
+
 # 冻结模式下资源在 _MEIPASS（onedir = _internal 目录）内
 FRONTEND_DIST = os.path.join(sys._MEIPASS, 'frontend', 'dist') if FROZEN else 'frontend/dist'
 
@@ -226,8 +233,25 @@ def _save_with_timestamp(file: UploadFile, seq: int) -> str:
     stem = re.sub(r'[^\w\-.]', '_', stem) or 'file'
     ext = re.sub(r'[^\w.]', '', ext)[:16]
     name = f"{stem}_{stamp}_{seq}{ext}"
-    with open(os.path.join(UPLOAD_DIR, name), 'wb') as f:
-        f.write(file.file.read())
+    path = os.path.join(UPLOAD_DIR, name)
+    total = 0
+    try:
+        with open(path, 'wb') as out:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if MAX_UPLOAD_SIZE and total > MAX_UPLOAD_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f'文件超过大小限制({MAX_UPLOAD_SIZE // 1024 // 1024} MB)',
+                    )
+                out.write(chunk)
+    except HTTPException:
+        if os.path.isfile(path):
+            os.remove(path)
+        raise
     return name
 
 
@@ -240,6 +264,10 @@ async def upload_files(files: list[UploadFile] = File(...)):
     counter = {}
     for f in files:
         name = f.filename or "file"
+        if UPLOAD_EXT_WHITELIST:
+            ext = os.path.splitext(name)[1].lower().lstrip('.')
+            if not ext or ext not in UPLOAD_EXT_WHITELIST:
+                raise HTTPException(status_code=415, detail=f'不支持的文件类型：{ext or "(无扩展名)"}')
         counter[name] = counter.get(name, 0) + 1
         saved.append(_save_with_timestamp(f, counter[name]))
     logger.info(f'保存文件：{saved}')
