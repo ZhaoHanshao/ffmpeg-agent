@@ -1,4 +1,4 @@
-import os, sys, shutil, json, atexit, io, zipfile, datetime, logging, asyncio, threading, traceback
+import os, sys, shutil, json, re, atexit, io, zipfile, datetime, logging, asyncio, threading, traceback
 
 # ── 冻结模式（PyInstaller 打包）预处理 ──
 # 必须在任何重依赖 import 之前执行：
@@ -150,10 +150,30 @@ def _clear_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
 
+def _safe_path(base: str, name: str):
+    """将 name 约束到 base 目录内(防路径穿越)。
+
+    返回规范化后的绝对路径;若 name 为空、含 NUL、是绝对路径或解析后逃出 base,返回 None。
+    """
+    if not name or '\x00' in name:
+        return None
+    base = os.path.realpath(os.path.abspath(base))
+    candidate = os.path.abspath(os.path.join(base, os.path.normpath(name.lstrip('/\\'))))
+    real = os.path.realpath(candidate)
+    if real != base and not real.startswith(base + os.sep):
+        return None
+    return candidate
+
+
 def _save_with_timestamp(file: UploadFile, seq: int) -> str:
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    raw = (file.filename or "file").replace('\\', '/')
+    base = os.path.basename(raw) or 'file'
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem, ext = os.path.splitext(file.filename or "file")
+    stem, ext = os.path.splitext(base)
+    # 客户端可控的文件名必须清洗:只保留安全字符,杜绝 ../../ 与非法路径写入
+    stem = re.sub(r'[^\w\-.]', '_', stem) or 'file'
+    ext = re.sub(r'[^\w.]', '', ext)[:16]
     name = f"{stem}_{stamp}_{seq}{ext}"
     with open(os.path.join(UPLOAD_DIR, name), 'wb') as f:
         f.write(file.file.read())
@@ -327,11 +347,11 @@ async def delete_output(filename: str):
     """删除 download/ 中的已完成文件"""
     logger.info('删除已完成文件')
     logger.info(f'文件名：{filename}')
-    path = os.path.join(DOWNLOAD_DIR, filename)
-    if not os.path.exists(path):
+    path = _safe_path(DOWNLOAD_DIR, filename)
+    if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="文件不存在")
     os.remove(path)
-    return {"deleted": filename}
+    return {"deleted": os.path.basename(path)}
 
 
 @app.post("/api/output/delete")
@@ -340,10 +360,10 @@ async def batch_delete_output(body: dict):
     files = body.get("files", [])
     results = {"deleted": [], "not_found": []}
     for f in files:
-        path = os.path.join(DOWNLOAD_DIR, f)
-        if os.path.exists(path):
+        path = _safe_path(DOWNLOAD_DIR, f)
+        if path and os.path.isfile(path):
             os.remove(path)
-            results["deleted"].append(f)
+            results["deleted"].append(os.path.basename(path))
         else:
             results["not_found"].append(f)
     return results
@@ -356,9 +376,9 @@ async def batch_download_output(body: dict):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for f in files:
-            path = os.path.join(DOWNLOAD_DIR, f)
-            if os.path.exists(path):
-                zf.write(path, arcname=f)
+            path = _safe_path(DOWNLOAD_DIR, f)
+            if path and os.path.isfile(path):
+                zf.write(path, arcname=os.path.basename(path))
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",
@@ -371,8 +391,8 @@ async def get_output(filename: str):
     """返回 download/ 中的文件"""
     logger.info('下载已完成文件')
     logger.info(f'文件名：{filename}')
-    path = os.path.join(DOWNLOAD_DIR, filename)
-    if not os.path.exists(path):
+    path = _safe_path(DOWNLOAD_DIR, filename)
+    if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="文件不存在")
     return FileResponse(path)
 
@@ -393,8 +413,8 @@ async def get_uploaded(filename: str):
     """返回 upload/ 中的文件供下载"""
     logger.info('下载上传文件')
     logger.info(f'文件名：{filename}')
-    path = os.path.join(UPLOAD_DIR, filename)
-    if not os.path.exists(path):
+    path = _safe_path(UPLOAD_DIR, filename)
+    if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="文件不存在")
     return FileResponse(path)
 
@@ -404,12 +424,12 @@ async def delete_uploaded(filename: str):
     """删除 upload/ 中的文件"""
     logger.info('删除上传文件')
     logger.info(f'文件名：{filename}')
-    path = os.path.join(UPLOAD_DIR, filename)
-    if not os.path.exists(path):
+    path = _safe_path(UPLOAD_DIR, filename)
+    if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="文件不存在")
     os.remove(path)
-    logger.info(f'删除成功：{filename}')
-    return {"deleted": filename}
+    logger.info(f'删除成功：{os.path.basename(path)}')
+    return {"deleted": os.path.basename(path)}
 
 from fastapi.staticfiles import StaticFiles
 
