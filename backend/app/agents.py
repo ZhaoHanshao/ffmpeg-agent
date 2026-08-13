@@ -37,7 +37,8 @@ _execute_prompt = (
     '7. 一个任务只执行一次 ffmpeg，不要重复尝试多种参数\n'
     '8. 如果 ffmpeg 成功（返回 flag=true），立即结束，不要继续尝试其他命令\n'
     '9. 不要执行 convert、dwebp、apt-get、sudo、pip、python、ls、pwd、find、which 等非 ffmpeg 命令\n'
-    '10. 如果 ffmpeg 执行失败，不要重试，直接返回失败原因。'
+    '10. 如果 ffmpeg 执行失败：分析失败原因；仅当原因明确且有把握修正时（如参数拼写、路径、格式兼容问题），'
+    '基于错误信息修正后重试一次；否则直接结束并返回失败原因，不要盲目反复重试。'
 )
 
 _chat_prompt = (
@@ -110,7 +111,8 @@ _probe_execute_prompt = (
     '7. 一个任务只执行一次 ffprobe，不要重复尝试多种参数\n'
     '8. 如果 ffprobe 成功（返回 flag=true），立即结束，不要继续尝试其他命令\n'
     '9. 不要执行 ffmpeg、convert、apt-get、sudo、pip、python、ls、pwd、find、which 等非 ffprobe 命令\n'
-    '10. 如果 ffprobe 执行失败，不要重试，直接返回失败原因。'
+    '10. 如果 ffprobe 执行失败：分析失败原因；仅当原因明确且有把握修正时（如参数拼写、路径问题），'
+    '基于错误信息修正后重试一次；否则直接结束并返回失败原因，不要盲目反复重试。'
 )
 
 _probe_chat_prompt = (
