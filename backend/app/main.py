@@ -1,4 +1,5 @@
 import os, sys, shutil, json, re, io, zipfile, datetime, logging, asyncio, threading, traceback, secrets
+from contextlib import asynccontextmanager
 
 # ── 冻结模式（PyInstaller 打包）预处理 ──
 # 必须在任何重依赖 import 之前执行：
@@ -193,13 +194,17 @@ def _preload():
         _init_state['error'] = traceback.format_exc()
 
 
-@app.on_event("startup")
-def preload_models():
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     # 冻结模式下后台预加载，不阻塞 web 服务（首跑建库需数分钟）
     if FROZEN:
         threading.Thread(target=_preload, daemon=True).start()
     else:
         _preload()
+    yield
+
+
+app.router.lifespan_context = lifespan
 
 
 def _clear_dir(path: str):
