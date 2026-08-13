@@ -1,4 +1,4 @@
-import os, sys, shutil, json, re, atexit, io, zipfile, datetime, logging, asyncio, threading, traceback, secrets
+import os, sys, shutil, json, re, io, zipfile, datetime, logging, asyncio, threading, traceback, secrets
 
 # ── 冻结模式（PyInstaller 打包）预处理 ──
 # 必须在任何重依赖 import 之前执行：
@@ -73,16 +73,12 @@ DOWNLOAD_DIR = os.getenv('DOWNLOAD', 'backend/download')
 # 冻结模式下资源在 _MEIPASS（onedir = _internal 目录）内
 FRONTEND_DIST = os.path.join(sys._MEIPASS, 'frontend', 'dist') if FROZEN else 'frontend/dist'
 
-# 启动时清理历史数据 + 程序退出时清理
-def _cleanup():
-    for _dir in (UPLOAD_DIR, DOWNLOAD_DIR):
-        if os.path.exists(_dir):
-            shutil.rmtree(_dir)
+# 数据目录仅确保存在,不再启动/退出时清空:上传文件与转码成果跨重启保留
+def _ensure_dirs():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-_cleanup()
-atexit.register(_cleanup)
+_ensure_dirs()
 
 app = FastAPI(title="ffmpeg-agent")
 

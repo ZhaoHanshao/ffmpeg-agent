@@ -277,15 +277,6 @@ def execute_command(command: str, config: RunnableConfig):
     proc_box = conf.get('proc')
 
     with _execute_lock:
-        # 清空下载目录，防止 ffmpeg 阻塞在 Overwrite? [y/N] 提示
-        # 本次选中的输入文件（可能来自下载目录）需要保留，不能被清掉
-        protected = {os.path.normpath(p) for p in (conf.get('selected_files') or [])}
-        if os.path.exists(DOWNLOAD):
-            for f in os.listdir(DOWNLOAD):
-                fp = os.path.join(DOWNLOAD, f)
-                if os.path.isfile(fp) and os.path.normpath(fp) not in protected:
-                    os.remove(fp)
-
         try:
             run_parts = split_command(command)
             # 输入源安全校验：只允许 UPLOAD/DOWNLOAD 内的文件或 lavfi 虚拟源
@@ -296,6 +287,9 @@ def execute_command(command: str, config: RunnableConfig):
                     'command_result': '拒绝执行：输入源不在允许目录内或使用了被禁止的网络协议：'
                                      + '、'.join(denied) + '。请只使用 get_files 返回的文件。',
                 }
+            # 注入 -y 静默覆盖同名输出,替代"每次清空下载目录"的粗暴做法(输出文件可跨任务保留)
+            if '-y' not in run_parts and '-n' not in run_parts:
+                run_parts.insert(1, '-y')
             run_parts[0] = ffmpeg_bin('ffmpeg')
             returncode, _, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffmpeg', stop_event, proc_box)
             if returncode == 0:
