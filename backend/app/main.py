@@ -359,11 +359,6 @@ async def chat(question: str = Form(...), files: list[str] = Form(default=[]), h
         )
 
     selected = _sanitize_selected_files(files)
-    if not selected:
-        return Response(
-            content=f"data: {json.dumps({'event': 'error', 'text': '请先选择要处理的文件，再发起需求'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
-            media_type="text/event-stream",
-        )
 
     logger.info('处理对话')
     logger.info(f'用户问题：{question[:200]}')
@@ -402,11 +397,6 @@ async def probe_chat(question: str = Form(...), files: list[str] = Form(default=
         )
 
     selected = _sanitize_selected_files(files)
-    if not selected:
-        return Response(
-            content=f"data: {json.dumps({'event': 'error', 'text': '请先选择要处理的文件，再发起需求'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
-            media_type="text/event-stream",
-        )
 
     logger.info('处理 ffprobe 对话')
     logger.info(f'用户问题：{question[:200]}')

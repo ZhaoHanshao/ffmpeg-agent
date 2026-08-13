@@ -124,6 +124,9 @@ def which_continue_exec(state: state):
     ev = state.get('stop_event')
     if ev is not None and ev.is_set():
         branch = END
+    elif not (state.get('files') or []):
+        # 纯知识问答(未选择文件)：检索后直接结束,不进入命令执行阶段
+        branch = END
     elif state.get('flag', False):
         branch = END
     elif state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
