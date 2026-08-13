@@ -26,7 +26,8 @@ for _env_name, _key, _cast in (('TEMPERATURE', 'temperature', float), ('MAX_TOKE
         except ValueError:
             logger.warning(f'忽略无效的环境变量 {_env_name}={_raw!r}')
 
-_config_lock = threading.Lock()
+# RLock:get_model_config 持锁期间还会调用 is_configured,可重入避免死锁
+_config_lock = threading.RLock()
 _model = None
 
 
