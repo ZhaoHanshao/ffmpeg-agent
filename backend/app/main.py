@@ -479,7 +479,10 @@ async def get_llm_settings():
 
 @app.put("/api/settings/llm")
 async def update_llm_settings(body: dict):
-    update_model_config(body)
+    try:
+        update_model_config(body)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     cfg = get_model_config()
     _settings_store.update(cfg)
     return _settings_store
