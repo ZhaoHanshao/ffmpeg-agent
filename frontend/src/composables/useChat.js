@@ -65,6 +65,12 @@ export function useChat(mode) {
       const form = new FormData()
       form.append('question', text)
       for (const f of files) form.append('files', `${f.src === 'output' ? 'download' : 'upload'}:${f.name}`)
+      // 多轮记忆：把最近 6 条历史(不含当前提问与占位回复)随请求发给后端
+      const roleName = { user: '用户', ai: '助手', system: '系统' }
+      for (const m of messages.value.slice(0, -2).slice(-6)) {
+        const body = (m.text || '').trim().replace(/\s+/g, ' ').slice(0, 500)
+        if (body) form.append('history', `${roleName[m.role] || '消息'}: ${body}`)
+      }
       const res = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         body: form,

@@ -21,6 +21,7 @@ class state(MessagesState):
     execute_count: int = 0
     progress: list = None
     files: list = None
+    context: str = ''
 
 
 def search(state: state):
@@ -43,10 +44,14 @@ def search(state: state):
     state['history'] = mes
     if state['flag'] or state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
         return state
+    # 多轮对话：把历史上下文作为参考消息前置(不要求其回答历史问题)
+    context_msgs = []
+    if state.get('context'):
+        context_msgs = [HumanMessage(content=f'对话历史（仅供参考，请结合当前问题理解用户意图）：\n{state["context"]}')]
     if state['command'] is not None:
-        res = agent_search.invoke({'messages': [*mes, HumanMessage(content=state['command_result'])]})
+        res = agent_search.invoke({'messages': [*context_msgs, *mes, HumanMessage(content=state['command_result'])]})
     else:
-        res = agent_search.invoke({'messages': mes})
+        res = agent_search.invoke({'messages': [*context_msgs, *mes]})
     state['result'] = res['messages'][-1].content
     state['search_count'] = state.get('search_count', 0) + 1
     return state
@@ -69,6 +74,8 @@ def execute(state: state):
         f'用户问题：{user_question}\n\n'
         f'知识库检索结果：{state["result"]}'
     )
+    if state.get('context'):
+        execute_prompt += f'\n\n对话历史（仅供参考）：\n{state["context"]}'
     res = agent_execute.invoke(
         {'messages': [HumanMessage(content=execute_prompt)]},
         config={'configurable': {'selected_files': state.get('files') or []}},
@@ -118,7 +125,7 @@ exec_workflow.add_conditional_edges(
 )
 
 
-def exec_graph(question: str, progress: list = None, files: list = None) -> dict:
+def exec_graph(question: str, progress: list = None, files: list = None, context: str = '') -> dict:
     logger.info(f'开始执行，用户问题：{question}')
     compiled = exec_workflow.compile()
     result = compiled.invoke({
@@ -133,6 +140,7 @@ def exec_graph(question: str, progress: list = None, files: list = None) -> dict
         "execute_count": 0,
         "progress": progress,
         "files": files or [],
+        "context": context or '',
     })
     return result
 
@@ -144,6 +152,8 @@ def build_chat_prompt(state: dict) -> str:
         f'用户问题：{user_question}\n\n'
         f'知识库检索结果：{state.get("result", "")}\n'
     )
+    if state.get('context'):
+        prompt += f'\n对话历史（仅供参考）：\n{state["context"]}'
     if state.get('command'):
         prompt += f'\n执行的命令：{state["command"]}'
     if state.get('command_result'):
@@ -177,10 +187,13 @@ def probe_search(state: state):
     state['history'] = mes
     if state['flag'] or state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
         return state
+    context_msgs = []
+    if state.get('context'):
+        context_msgs = [HumanMessage(content=f'对话历史（仅供参考，请结合当前问题理解用户意图）：\n{state["context"]}')]
     if state['command'] is not None:
-        res = agent_probe_search.invoke({'messages': [*mes, HumanMessage(content=state['command_result'])]})
+        res = agent_probe_search.invoke({'messages': [*context_msgs, *mes, HumanMessage(content=state['command_result'])]})
     else:
-        res = agent_probe_search.invoke({'messages': mes})
+        res = agent_probe_search.invoke({'messages': [*context_msgs, *mes]})
     state['result'] = res['messages'][-1].content
     state['search_count'] = state.get('search_count', 0) + 1
     return state
@@ -203,6 +216,8 @@ def probe_execute(state: state):
         f'用户问题：{user_question}\n\n'
         f'知识库检索结果：{state["result"]}'
     )
+    if state.get('context'):
+        execute_prompt += f'\n\n对话历史（仅供参考）：\n{state["context"]}'
     res = agent_probe_execute.invoke(
         {'messages': [HumanMessage(content=execute_prompt)]},
         config={'configurable': {'selected_files': state.get('files') or []}},
@@ -233,7 +248,7 @@ probe_exec_workflow.add_conditional_edges(
 )
 
 
-def probe_exec_graph(question: str, progress: list = None, files: list = None) -> dict:
+def probe_exec_graph(question: str, progress: list = None, files: list = None, context: str = '') -> dict:
     logger.info(f'开始执行 ffprobe 任务，用户问题：{question}')
     compiled = probe_exec_workflow.compile()
     result = compiled.invoke({
@@ -248,6 +263,7 @@ def probe_exec_graph(question: str, progress: list = None, files: list = None) -
         "execute_count": 0,
         "progress": progress,
         "files": files or [],
+        "context": context or '',
     })
     return result
 
@@ -259,6 +275,8 @@ def build_probe_chat_prompt(state: dict) -> str:
         f'用户问题：{user_question}\n\n'
         f'知识库检索结果：{state.get("result", "")}\n'
     )
+    if state.get('context'):
+        prompt += f'\n对话历史（仅供参考）：\n{state["context"]}'
     if state.get('command'):
         prompt += f'\n执行的命令：{state["command"]}'
     if state.get('command_result'):

@@ -285,8 +285,14 @@ def _sanitize_selected_files(files: list[str]) -> list[str]:
     return result
 
 
+def _build_context(history: list[str]) -> str:
+    """把前端传来的多轮对话整理成上下文文本(最多 6 条、总长 4000 字符)。"""
+    entries = [h.strip() for h in (history or []) if h and h.strip()]
+    return '\n'.join(entries[-6:])[:4000]
+
+
 @app.post("/api/chat")
-async def chat(question: str = Form(...), files: list[str] = Form(default=[])):
+async def chat(question: str = Form(...), files: list[str] = Form(default=[]), history: list[str] = Form(default=[])):
     """发送问题 → 流式输出（ffmpeg search+execute 进度 + chat 逐 token）"""
     if _init_state['status'] == 'running':
         return Response(
@@ -313,14 +319,15 @@ async def chat(question: str = Form(...), files: list[str] = Form(default=[])):
 
     from app.agents import agent_chat
 
+    context = _build_context(history)
     return StreamingResponse(
-        _event_stream(question, lambda q, p: exec_graph(q, p, files=selected), agent_chat, build_chat_prompt),
+        _event_stream(question, lambda q, p: exec_graph(q, p, files=selected, context=context), agent_chat, build_chat_prompt),
         media_type="text/event-stream",
     )
 
 
 @app.post("/api/probe/chat")
-async def probe_chat(question: str = Form(...), files: list[str] = Form(default=[])):
+async def probe_chat(question: str = Form(...), files: list[str] = Form(default=[]), history: list[str] = Form(default=[])):
     """发送问题 → 流式输出（ffprobe search+execute 进度 + chat 逐 token）"""
     if _init_state['status'] == 'running':
         return Response(
@@ -347,8 +354,9 @@ async def probe_chat(question: str = Form(...), files: list[str] = Form(default=
 
     from app.agents import agent_probe_chat
 
+    context = _build_context(history)
     return StreamingResponse(
-        _event_stream(question, lambda q, p: probe_exec_graph(q, p, files=selected), agent_probe_chat, build_probe_chat_prompt),
+        _event_stream(question, lambda q, p: probe_exec_graph(q, p, files=selected, context=context), agent_probe_chat, build_probe_chat_prompt),
         media_type="text/event-stream",
     )
 
