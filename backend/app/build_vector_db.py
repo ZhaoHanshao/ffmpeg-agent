@@ -73,6 +73,14 @@ def fetch_and_chunk(url: str) -> list[Document]:
                 break
             if sibling.name == 'a':
                 continue
+            if sibling.name == 'table':
+                # 表格按行结构化输出(单元格用 | 分隔),避免 get_text 把整表糊成一行
+                for tr in sibling.find_all('tr'):
+                    cells = [c.get_text(' ', strip=True) for c in tr.find_all(['th', 'td'])]
+                    line = ' | '.join(c for c in cells if c)
+                    if line:
+                        content_parts.append(line)
+                continue
             text = sibling.get_text(strip=True, separator=' ')
             if text:
                 content_parts.append(text)

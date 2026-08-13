@@ -171,6 +171,22 @@ def _run_binary(run_parts: list, timeout: int, label: str, stop_event=None, proc
                 proc_box[0] = None
 
 
+def _format_docs(result) -> list:
+    """把检索结果格式化成带标题上下文的文本;查询失败返回错误说明。"""
+    if isinstance(result, str):
+        return [result]
+    contents = []
+    for i, item in enumerate(result, 1):
+        if not isinstance(item, dict):
+            contents.append(f'来源[{i}]，{item}')
+            continue
+        title = (item.get('title') or '').strip()
+        content = (item.get('content') or '').strip()
+        header = f'来源[{i}]（{title}）' if title else f'来源[{i}]'
+        contents.append(f'{header}，{content}')
+    return contents
+
+
 @tool
 def get_command(squry: str):
     """
@@ -180,12 +196,7 @@ def get_command(squry: str):
     """
     logger.info('查询知识库')
     logger.info(f'查询内容：{squry[:200]}')
-    result = get_text(squry)
-    contents = []
-    for i, doc in enumerate(result, 1):
-        content = f'来源[{i}]，{doc}'
-        contents.append(content)
-    return contents
+    return _format_docs(get_text(squry))
 
 
 @tool
@@ -197,12 +208,7 @@ def get_probe_command(squry: str):
     """
     logger.info('查询 ffprobe 知识库')
     logger.info(f'查询内容：{squry[:200]}')
-    result = get_probe_text(squry)
-    contents = []
-    for i, doc in enumerate(result, 1):
-        content = f'来源[{i}]，{doc}'
-        contents.append(content)
-    return contents
+    return _format_docs(get_probe_text(squry))
 
 
 @tool
