@@ -1,4 +1,4 @@
-import os, sys, shutil, json, re, atexit, io, zipfile, datetime, logging, asyncio, threading, traceback
+import os, sys, shutil, json, re, atexit, io, zipfile, datetime, logging, asyncio, threading, traceback, secrets
 
 # ── 冻结模式（PyInstaller 打包）预处理 ──
 # 必须在任何重依赖 import 之前执行：
@@ -85,12 +85,34 @@ atexit.register(_cleanup)
 
 app = FastAPI(title="ffmpeg-agent")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 安全配置：设置 AUTH_TOKEN 后所有 /api/* 接口(除 /api/health)都需要携带令牌
+AUTH_TOKEN = os.getenv('AUTH_TOKEN', '').strip()
+# CORS：仅当显式配置 CORS_ORIGINS(逗号分隔)时才允许跨域,默认同源(前端由后端托管或走 dev 代理)
+CORS_ORIGINS = [o.strip() for o in os.getenv('CORS_ORIGINS', '').split(',') if o.strip()]
+
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if AUTH_TOKEN and request.url.path.startswith('/api/') and request.url.path != '/api/health':
+        token = request.headers.get('X-Auth-Token') or ''
+        auth = request.headers.get('Authorization') or ''
+        if auth.startswith('Bearer '):
+            token = auth[7:]
+        if not (token and secrets.compare_digest(token, AUTH_TOKEN)):
+            return Response(
+                content=json.dumps({'detail': '未授权：缺少或错误的访问令牌'}),
+                status_code=401,
+                media_type='application/json',
+            )
+    return await call_next(request)
 
 
 # 初始化状态：冻结模式下预加载在后台线程执行，健康检查据此返回状态

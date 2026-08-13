@@ -1,7 +1,26 @@
 const API_BASE = '/api'
+const TOKEN_KEY = 'ffmpeg_agent_token'
+
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY) || ''
+}
+
+export function setToken(token) {
+  if (token) localStorage.setItem(TOKEN_KEY, token)
+  else localStorage.removeItem(TOKEN_KEY)
+}
+
+// 服务端配置 AUTH_TOKEN 时,所有请求自动附带令牌
+export function authHeaders() {
+  const token = getToken()
+  return token ? { 'X-Auth-Token': token } : {}
+}
 
 async function request(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, options)
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: { ...authHeaders(), ...(options.headers || {}) },
+  })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res
 }

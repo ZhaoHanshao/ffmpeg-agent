@@ -1,5 +1,5 @@
 import { ref, reactive, computed, nextTick } from 'vue'
-import { API_BASE } from '../api'
+import { API_BASE, authHeaders } from '../api'
 
 const NEAR_BOTTOM_THRESHOLD = 120
 
@@ -69,6 +69,7 @@ export function useChat(mode) {
         method: 'POST',
         body: form,
         signal: ac.signal,
+        headers: authHeaders(),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
 

@@ -35,6 +35,10 @@ const emit = defineEmits(['save'])
           <input v-model="settings.api_key" type="password" placeholder="sk-..." />
         </label>
         <label class="settings-field">
+          <span>访问令牌 (AUTH_TOKEN, 服务端配置后必填)</span>
+          <input v-model="settings.auth_token" type="password" placeholder="与后端 AUTH_TOKEN 一致,可选" />
+        </label>
+        <label class="settings-field">
           <span>Temperature (温度)</span>
           <input v-model.number="settings.temperature" type="number" step="0.1" min="0" max="2" />
         </label>
