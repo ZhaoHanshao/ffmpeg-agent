@@ -146,13 +146,14 @@ exec_workflow.add_conditional_edges(
     which_continue_exec,
     {END: END, 'execute': 'execute'},
 )
+# 模块加载时编译一次,避免每个请求重复 compile()
+_compiled_exec = exec_workflow.compile()
 
 
 def exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
                stop_event=None, proc_box=None) -> dict:
     logger.info(f'开始执行，用户问题：{question}')
-    compiled = exec_workflow.compile()
-    result = compiled.invoke({
+    result = _compiled_exec.invoke({
         "messages": [HumanMessage(content=question)],
         "command": None,
         "result": "",
@@ -282,13 +283,14 @@ probe_exec_workflow.add_conditional_edges(
     which_continue_exec,
     {END: END, 'execute': 'execute'},
 )
+# 模块加载时编译一次,避免每个请求重复 compile()
+_compiled_probe_exec = probe_exec_workflow.compile()
 
 
 def probe_exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
                      stop_event=None, proc_box=None) -> dict:
     logger.info(f'开始执行 ffprobe 任务，用户问题：{question}')
-    compiled = probe_exec_workflow.compile()
-    result = compiled.invoke({
+    result = _compiled_probe_exec.invoke({
         "messages": [HumanMessage(content=question)],
         "command": None,
         "result": "",
