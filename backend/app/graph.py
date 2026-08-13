@@ -10,6 +10,10 @@ MAX_SEARCH_COUNT = 5
 MAX_EXECUTE_COUNT = 3
 
 
+class GraphCancelled(Exception):
+    """用户主动停止任务(SSE 中断或 /api/chat/stop)。"""
+
+
 class state(MessagesState):
     command: str = None
     result: str = ''
@@ -22,11 +26,21 @@ class state(MessagesState):
     progress: list = None
     files: list = None
     context: str = ''
+    stop_event: object = None
+    proc_box: object = None
+
+
+def _check_cancelled(state: state):
+    ev = state.get('stop_event')
+    if ev is not None and ev.is_set():
+        raise GraphCancelled('任务已被用户停止')
 
 
 def search(state: state):
     if not ensure_agents():
         raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
+
+    _check_cancelled(state)
 
     from app.agents import agent_search
 
@@ -61,6 +75,8 @@ def execute(state: state):
     if not ensure_agents():
         raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
 
+    _check_cancelled(state)
+
     from app.agents import agent_execute
 
     if state.get('progress') is not None:
@@ -78,7 +94,11 @@ def execute(state: state):
         execute_prompt += f'\n\n对话历史（仅供参考）：\n{state["context"]}'
     res = agent_execute.invoke(
         {'messages': [HumanMessage(content=execute_prompt)]},
-        config={'configurable': {'selected_files': state.get('files') or []}},
+        config={'configurable': {
+            'selected_files': state.get('files') or [],
+            'stop_event': state.get('stop_event'),
+            'proc': state.get('proc_box'),
+        }},
     )
     for msg in reversed(res['messages']):
         if isinstance(msg, ToolMessage):
@@ -101,7 +121,10 @@ def execute(state: state):
 
 
 def which_continue_exec(state: state):
-    if state['flag']:
+    ev = state.get('stop_event')
+    if ev is not None and ev.is_set():
+        branch = END
+    elif state['flag']:
         branch = END
     elif state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
         logger.info(f'执行次数已达上限（{MAX_EXECUTE_COUNT} 次），强制结束')
@@ -125,7 +148,8 @@ exec_workflow.add_conditional_edges(
 )
 
 
-def exec_graph(question: str, progress: list = None, files: list = None, context: str = '') -> dict:
+def exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
+               stop_event=None, proc_box=None) -> dict:
     logger.info(f'开始执行，用户问题：{question}')
     compiled = exec_workflow.compile()
     result = compiled.invoke({
@@ -141,6 +165,8 @@ def exec_graph(question: str, progress: list = None, files: list = None, context
         "progress": progress,
         "files": files or [],
         "context": context or '',
+        "stop_event": stop_event,
+        "proc_box": proc_box,
     })
     return result
 
@@ -170,6 +196,8 @@ def build_chat_prompt(state: dict) -> str:
 def probe_search(state: state):
     if not ensure_probe_agents():
         raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
+
+    _check_cancelled(state)
 
     from app.agents import agent_probe_search
 
@@ -203,6 +231,8 @@ def probe_execute(state: state):
     if not ensure_probe_agents():
         raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
 
+    _check_cancelled(state)
+
     from app.agents import agent_probe_execute
 
     if state.get('progress') is not None:
@@ -220,7 +250,11 @@ def probe_execute(state: state):
         execute_prompt += f'\n\n对话历史（仅供参考）：\n{state["context"]}'
     res = agent_probe_execute.invoke(
         {'messages': [HumanMessage(content=execute_prompt)]},
-        config={'configurable': {'selected_files': state.get('files') or []}},
+        config={'configurable': {
+            'selected_files': state.get('files') or [],
+            'stop_event': state.get('stop_event'),
+            'proc': state.get('proc_box'),
+        }},
     )
     for msg in reversed(res['messages']):
         if isinstance(msg, ToolMessage):
@@ -248,7 +282,8 @@ probe_exec_workflow.add_conditional_edges(
 )
 
 
-def probe_exec_graph(question: str, progress: list = None, files: list = None, context: str = '') -> dict:
+def probe_exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
+                     stop_event=None, proc_box=None) -> dict:
     logger.info(f'开始执行 ffprobe 任务，用户问题：{question}')
     compiled = probe_exec_workflow.compile()
     result = compiled.invoke({
@@ -264,6 +299,8 @@ def probe_exec_graph(question: str, progress: list = None, files: list = None, c
         "progress": progress,
         "files": files or [],
         "context": context or '',
+        "stop_event": stop_event,
+        "proc_box": proc_box,
     })
     return result
 

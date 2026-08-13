@@ -102,25 +102,35 @@ def _check_inputs(parts: list) -> list:
     return denied
 
 
-def _run_binary(run_parts: list, timeout: int, label: str):
+def _run_binary(run_parts: list, timeout: int, label: str, stop_event=None, proc_box=None):
     """执行 ffmpeg/ffprobe 并返回 (returncode, stdout_str, stderr_str)。
     - stdin 指向空设备,避免 ffmpeg 的 Overwrite 等交互提示阻塞
-    - 输出写入临时文件(避免管道写满死锁),轮询等待,超时强制 kill
+    - 输出写入临时文件(避免管道写满死锁),轮询等待,超时/收到停止信号时强制 kill
     """
     with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
         proc = subprocess.Popen(args=run_parts, stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr)
-        deadline = time.monotonic() + timeout
-        while proc.poll() is None:
-            if time.monotonic() > deadline:
-                proc.kill()
-                proc.wait()
-                ferr.seek(0)
-                err_tail = ferr.read().decode(errors='replace')[-2000:]
-                raise TimeoutError(f'{label} 执行超过 {timeout} 秒，已强制终止。{err_tail}')
-            time.sleep(0.2)
-        fout.seek(0)
-        ferr.seek(0)
-        return proc.returncode, fout.read().decode(errors='replace'), ferr.read().decode(errors='replace')
+        if proc_box is not None:
+            proc_box[0] = proc
+        try:
+            deadline = time.monotonic() + timeout
+            while proc.poll() is None:
+                if stop_event is not None and stop_event.is_set():
+                    proc.kill()
+                    proc.wait()
+                    raise InterruptedError(f'{label} 已被用户停止')
+                if time.monotonic() > deadline:
+                    proc.kill()
+                    proc.wait()
+                    ferr.seek(0)
+                    err_tail = ferr.read().decode(errors='replace')[-2000:]
+                    raise TimeoutError(f'{label} 执行超过 {timeout} 秒，已强制终止。{err_tail}')
+                time.sleep(0.2)
+            fout.seek(0)
+            ferr.seek(0)
+            return proc.returncode, fout.read().decode(errors='replace'), ferr.read().decode(errors='replace')
+        finally:
+            if proc_box is not None:
+                proc_box[0] = None
 
 
 @tool
@@ -222,10 +232,14 @@ def execute_command(command: str, config: RunnableConfig):
     logger.info(f'执行命令：{command}')
     os.makedirs(DOWNLOAD, exist_ok=True)
 
+    conf = ((config or {}).get('configurable') or {})
+    stop_event = conf.get('stop_event')
+    proc_box = conf.get('proc')
+
     with _execute_lock:
         # 清空下载目录，防止 ffmpeg 阻塞在 Overwrite? [y/N] 提示
         # 本次选中的输入文件（可能来自下载目录）需要保留，不能被清掉
-        protected = {os.path.normpath(p) for p in (((config or {}).get('configurable') or {}).get('selected_files') or [])}
+        protected = {os.path.normpath(p) for p in (conf.get('selected_files') or [])}
         if os.path.exists(DOWNLOAD):
             for f in os.listdir(DOWNLOAD):
                 fp = os.path.join(DOWNLOAD, f)
@@ -243,7 +257,7 @@ def execute_command(command: str, config: RunnableConfig):
                                      + '、'.join(denied) + '。请只使用 get_files 返回的文件。',
                 }
             run_parts[0] = ffmpeg_bin('ffmpeg')
-            returncode, _, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffmpeg')
+            returncode, _, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffmpeg', stop_event, proc_box)
             if returncode == 0:
                 return {'command': command, 'flag': True, 'command_result': f'{command} 执行成功'}
             else:
@@ -261,10 +275,15 @@ def execute_command(command: str, config: RunnableConfig):
                 'command': command,
                 'command_result': f'命令执行超时：{e}',
             }
+        except InterruptedError as e:
+            return {
+                'command': command,
+                'command_result': f'{e}',
+            }
 
 
 @tool
-def execute_probe_command(command: str):
+def execute_probe_command(command: str, config: RunnableConfig):
     """
     执行ffprobe命令（只读分析工具，结果输出到标准输出）
     参数值：
@@ -283,6 +302,10 @@ def execute_probe_command(command: str):
             'command_result': f'拒绝执行非 ffprobe 命令：{cmd_name}。请直接使用 ffprobe 命令完成任务。',
         }
 
+    conf = ((config or {}).get('configurable') or {})
+    stop_event = conf.get('stop_event')
+    proc_box = conf.get('proc')
+
     try:
         run_parts = split_command(command)
         # 输入源安全校验(与 ffmpeg 相同)：防 SSRF 与任意文件读取
@@ -294,7 +317,7 @@ def execute_probe_command(command: str):
                                  + '、'.join(denied) + '。请只使用 get_files 返回的文件。',
             }
         run_parts[0] = ffmpeg_bin('ffprobe')
-        returncode, stdout, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffprobe')
+        returncode, stdout, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffprobe', stop_event, proc_box)
         if returncode == 0:
             output = stdout.strip()
             return {
@@ -316,4 +339,9 @@ def execute_probe_command(command: str):
         return {
             'command': command,
             'command_result': f'命令执行超时：{e}',
+        }
+    except InterruptedError as e:
+        return {
+            'command': command,
+            'command_result': f'{e}',
         }

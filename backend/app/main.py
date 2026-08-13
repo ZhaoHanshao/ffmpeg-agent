@@ -54,6 +54,7 @@ exec_graph = _graph_mod.exec_graph
 build_chat_prompt = _graph_mod.build_chat_prompt
 probe_exec_graph = _graph_mod.probe_exec_graph
 build_probe_chat_prompt = _graph_mod.build_probe_chat_prompt
+GraphCancelled = _graph_mod.GraphCancelled
 
 _agents_mod = _step_import('app.agents', 'app.agents')
 ensure_agents = _agents_mod.ensure_agents
@@ -117,6 +118,38 @@ async def auth_middleware(request: Request, call_next):
 
 # 初始化状态：冻结模式下预加载在后台线程执行，健康检查据此返回状态
 _init_state = {'status': 'running', 'progress': 0, 'step': '启动中', 'error': None}  # running / ok / error
+
+# 运行中的聊天任务:job_id → {'stop': threading.Event, 'proc': [Popen|None]},用于真实取消
+_jobs = {}
+_jobs_lock = threading.Lock()
+
+
+def _register_job():
+    job_id = os.urandom(6).hex()
+    job = {'stop': threading.Event(), 'proc': [None]}
+    with _jobs_lock:
+        _jobs[job_id] = job
+    return job_id, job
+
+
+def _unregister_job(job_id: str):
+    with _jobs_lock:
+        _jobs.pop(job_id, None)
+
+
+def _stop_job(job_id: str) -> bool:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return False
+    job['stop'].set()
+    proc = job['proc'][0]
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    return True
 
 
 def _preload():
@@ -217,55 +250,78 @@ async def upload_files(files: list[UploadFile] = File(...)):
     return {"uploaded": saved}
 
 
-async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder):
-    """公共 SSE 流：graph 进度 → meta → chat 逐 token → done"""
+async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job=None):
+    """公共 SSE 流：job → graph 进度 → meta → chat 逐 token → done"""
+    stop_event = job['stop'] if job else None
+    job_id = job['job_id'] if job else ''
     progress = []
-    graph_task = asyncio.create_task(
-        asyncio.to_thread(graph_fn, question, progress)
-    )
-
-    while not graph_task.done():
-        while progress:
-            yield f"data: {json.dumps({'event': 'status', 'text': progress.pop(0)})}\n\n"
-        await asyncio.sleep(0.2)
-
+    graph_task = None
     try:
-        exec_state = await graph_task
-    except Exception as e:
-        logger.error(f'图谱执行失败：{e}')
-        yield f"data: {json.dumps({'event': 'error', 'text': f'知识库查询或命令执行失败：{str(e)}'})}\n\n"
+        yield f"data: {json.dumps({'event': 'job', 'job_id': job_id})}\n\n"
+
+        graph_task = asyncio.create_task(
+            asyncio.to_thread(graph_fn, question, progress)
+        )
+
+        while not graph_task.done():
+            while progress:
+                yield f"data: {json.dumps({'event': 'status', 'text': progress.pop(0)})}\n\n"
+            await asyncio.sleep(0.2)
+
+        try:
+            exec_state = await graph_task
+        except GraphCancelled:
+            yield f"data: {json.dumps({'event': 'cancelled'})}\n\n"
+            yield "data: {\"event\": \"done\"}\n\n"
+            return
+        except Exception as e:
+            logger.error(f'图谱执行失败：{e}')
+            yield f"data: {json.dumps({'event': 'error', 'text': f'知识库查询或命令执行失败：{str(e)}'})}\n\n"
+            yield "data: {\"event\": \"done\"}\n\n"
+            return
+
+        output_file = exec_state.get('output_file', '') or ''
+
+        yield f"data: {json.dumps({'event': 'meta', 'output_file': output_file})}\n\n"
+
+        yield f"data: {json.dumps({'event': 'status', 'text': '正在生成回答...'})}\n\n"
+
+        chat_prompt = prompt_builder(exec_state)
+        full_text = ''
+        try:
+            async for event in chat_agent.astream_events(
+                {"messages": [HumanMessage(content=chat_prompt)]},
+                version="v2",
+            ):
+                if event["event"] == "on_chat_model_stream":
+                    chunk = event["data"]["chunk"]
+                    content = getattr(chunk, 'content', '')
+                    if content:
+                        full_text += content
+                        yield f"data: {json.dumps({'event': 'token', 'text': content})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'event': 'error', 'text': str(e)})}\n\n"
+            return
+
         yield "data: {\"event\": \"done\"}\n\n"
-        return
 
-    output_file = exec_state.get('output_file', '') or ''
-
-    yield f"data: {json.dumps({'event': 'meta', 'output_file': output_file})}\n\n"
-
-    yield f"data: {json.dumps({'event': 'status', 'text': '正在生成回答...'})}\n\n"
-
-    chat_prompt = prompt_builder(exec_state)
-    full_text = ''
-    try:
-        async for event in chat_agent.astream_events(
-            {"messages": [HumanMessage(content=chat_prompt)]},
-            version="v2",
-        ):
-            if event["event"] == "on_chat_model_stream":
-                chunk = event["data"]["chunk"]
-                content = getattr(chunk, 'content', '')
-                if content:
-                    full_text += content
-                    yield f"data: {json.dumps({'event': 'token', 'text': content})}\n\n"
-    except Exception as e:
-        yield f"data: {json.dumps({'event': 'error', 'text': str(e)})}\n\n"
-        return
-
-    yield "data: {\"event\": \"done\"}\n\n"
-
-    if full_text:
-        logger.info(f'AI回复：{full_text[:200]}')
-    if output_file:
-        logger.info(f'输出文件：{output_file}')
+        if full_text:
+            logger.info(f'AI回复：{full_text[:200]}')
+        if output_file:
+            logger.info(f'输出文件：{output_file}')
+    finally:
+        # 客户端断开/异常退出时兜底取消,确保后台 ffmpeg 与 LLM 任务不会继续空转
+        if graph_task is not None and not graph_task.done() and stop_event is not None:
+            stop_event.set()
+            if job is not None:
+                proc = job['proc'][0]
+                if proc is not None and proc.poll() is None:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+        if job_id:
+            _unregister_job(job_id)
 
 
 def _sanitize_selected_files(files: list[str]) -> list[str]:
@@ -320,8 +376,16 @@ async def chat(question: str = Form(...), files: list[str] = Form(default=[]), h
     from app.agents import agent_chat
 
     context = _build_context(history)
+    job_id, job = _register_job()
     return StreamingResponse(
-        _event_stream(question, lambda q, p: exec_graph(q, p, files=selected, context=context), agent_chat, build_chat_prompt),
+        _event_stream(
+            question,
+            lambda q, p: exec_graph(q, p, files=selected, context=context,
+                                    stop_event=job['stop'], proc_box=job['proc']),
+            agent_chat,
+            build_chat_prompt,
+            job={'job_id': job_id, **job},
+        ),
         media_type="text/event-stream",
     )
 
@@ -355,10 +419,29 @@ async def probe_chat(question: str = Form(...), files: list[str] = Form(default=
     from app.agents import agent_probe_chat
 
     context = _build_context(history)
+    job_id, job = _register_job()
     return StreamingResponse(
-        _event_stream(question, lambda q, p: probe_exec_graph(q, p, files=selected, context=context), agent_probe_chat, build_probe_chat_prompt),
+        _event_stream(
+            question,
+            lambda q, p: probe_exec_graph(q, p, files=selected, context=context,
+                                          stop_event=job['stop'], proc_box=job['proc']),
+            agent_probe_chat,
+            build_probe_chat_prompt,
+            job={'job_id': job_id, **job},
+        ),
         media_type="text/event-stream",
     )
+
+
+@app.post("/api/chat/stop")
+async def stop_chat(body: dict):
+    """停止正在运行的任务：POST {"job_id": "..."}"""
+    job_id = (body or {}).get('job_id', '')
+    if not job_id:
+        raise HTTPException(status_code=400, detail="缺少 job_id")
+    stopped = _stop_job(job_id)
+    logger.info(f'停止任务 {job_id}：{"已停止" if stopped else "任务不存在或已结束"}')
+    return {"stopped": stopped}
 
 
 @app.get("/api/output")
