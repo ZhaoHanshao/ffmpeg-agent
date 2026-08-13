@@ -28,6 +28,44 @@ VIRTUAL_SOURCES = {
     'cellauto', 'mandelbrot', 'mptestsrc', 'haldclutsrc', 'flite',
 }
 
+# 取值型选项(后面跟一个值),用于区分"输出文件"与"选项值",避免误重写 -t 5 / -map 0:v 等
+VALUE_OPTS = {
+    '-i', '-f', '-t', '-to', '-ss', '-itsoffset', '-map', '-c', '-c:v', '-c:a', '-c:s', '-c:d',
+    '-codec', '-codec:v', '-codec:a', '-b', '-b:v', '-b:a', '-minrate', '-maxrate', '-bufsize',
+    '-r', '-s', '-aspect', '-vf', '-af', '-filter', '-filter:v', '-filter:a', '-filter_complex',
+    '-lavfi', '-vframes', '-frames:v', '-frames:a', '-q', '-qscale', '-q:v', '-q:a', '-crf',
+    '-preset', '-tune', '-profile', '-profile:v', '-profile:a', '-level', '-pix_fmt', '-ac',
+    '-ar', '-acodec', '-vcodec', '-scodec', '-vol', '-metadata', '-tag', '-tag:v', '-tag:a',
+    '-movflags', '-fps_mode', '-fpsmax', '-g', '-keyint_min', '-sc_threshold', '-threads',
+    '-x264-params', '-x265-params', '-pass', '-passlogfile', '-max_muxing_queue_size',
+    '-start_number', '-vsync', '-async', '-video_size', '-framerate', '-sample_fmt',
+    '-ch_layout', '-channel_layout', '-loglevel', '-progress', '-timelimit', '-duration',
+    '-muxpreload', '-muxdelay', '-analyzeduration', '-probesize', '-target', '-vtag', '-atag',
+    '-stream_loop', '-loop', '-rtsp_transport', '-user_agent', '-headers',
+}
+
+
+def find_output_indexes(parts: list) -> list:
+    """解析 ffmpeg 参数,返回未被取值型选项消费的裸参数下标(即输出文件位置)。
+
+    修复旧启发式(取"最后一个非 - 开头参数")的缺陷：-t 5 / -map 0:v / -i in.mp4
+    等选项值不再被误判为输出。
+    """
+    outputs = []
+    consume_next = False
+    for i, p in enumerate(parts):
+        if i == 0:
+            continue  # 跳过命令名
+        if consume_next:
+            consume_next = False
+            continue
+        if p.startswith('-'):
+            if p in VALUE_OPTS:
+                consume_next = True
+            continue
+        outputs.append(i)
+    return outputs
+
 
 def _is_frozen() -> bool:
     return bool(getattr(sys, 'frozen', False))
@@ -210,22 +248,18 @@ def execute_command(command: str, config: RunnableConfig):
             'command_result': f'拒绝执行非 ffmpeg 命令：{cmd_name}。请直接使用 ffmpeg 命令完成任务。',
         }
 
-    # 将输出路径强制重写到 DOWNLOAD 目录
+    # 将输出路径强制重写到 DOWNLOAD 目录(按参数语法解析,支持多输出)
     parts = split_command(command)
-    output_idx = None
-    for i in range(len(parts) - 1, -1, -1):
-        if i == 0:
-            continue  # 跳过命令名
-        if parts[i].startswith('-'):
-            continue  # 跳过标志参数
-        output_idx = i
-        break
-
-    if output_idx is not None:
-        original = parts[output_idx]
-        # 仅当路径尚未指向 DOWNLOAD 时才重写
-        if DOWNLOAD not in original and DOWNLOAD not in os.path.dirname(original):
-            parts[output_idx] = os.path.join(DOWNLOAD, os.path.basename(original))
+    output_indexes = find_output_indexes(parts)
+    if output_indexes:
+        rewritten = False
+        for idx in output_indexes:
+            original = parts[idx]
+            # 仅当路径尚未指向 DOWNLOAD 时才重写
+            if DOWNLOAD not in original and DOWNLOAD not in os.path.dirname(original):
+                parts[idx] = os.path.join(DOWNLOAD, os.path.basename(original))
+                rewritten = True
+        if rewritten:
             command = subprocess.list2cmdline(parts)
             logger.info(f'输出路径已重写至 {DOWNLOAD}/')
 

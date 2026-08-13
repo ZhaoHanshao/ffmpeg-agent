@@ -1,6 +1,6 @@
 import os, json, logging
 from app.agents import ensure_agents, ensure_probe_agents
-from app.tools import split_command
+from app.tools import split_command, find_output_indexes
 from langgraph.graph import START, END, StateGraph, MessagesState
 from langchain.messages import ToolMessage, AnyMessage, AIMessage, HumanMessage
 
@@ -110,10 +110,9 @@ def execute(state: state):
                     state['command_result'] = data.get('command_result', '')
                     if data.get('flag') and data.get('command'):
                         parts = split_command(data['command'])
-                        for part in reversed(parts):
-                            if not part.startswith('-'):
-                                state['output_file'] = os.path.basename(part)
-                                break
+                        idxs = find_output_indexes(parts)
+                        if idxs:
+                            state['output_file'] = os.path.basename(parts[idxs[-1]])
             except Exception:
                 pass
             break
