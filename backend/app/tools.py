@@ -2,7 +2,7 @@ from langchain.tools import tool
 from langchain_core.runnables import RunnableConfig
 from app.db_search import get_text, get_probe_text
 from dotenv import load_dotenv
-import os, sys, subprocess, shlex, logging
+import os, sys, subprocess, shlex, logging, time, tempfile
 
 load_dotenv()
 
@@ -10,6 +10,20 @@ logger = logging.getLogger(__name__)
 
 DOWNLOAD = os.getenv('DOWNLOAD', 'backend/download')
 UPLOAD = os.getenv('UPLOAD', 'backend/upload')
+
+# 单条命令最长执行时间(秒),超时强制终止,防止失控命令占死线程
+try:
+    EXEC_TIMEOUT = int(os.getenv('FFMPEG_TIMEOUT', '1800'))
+except ValueError:
+    EXEC_TIMEOUT = 1800
+
+# 允许作为 -i 输入的 lavfi 虚拟源(无真实文件路径)
+VIRTUAL_SOURCES = {
+    'lavfi', 'testsrc', 'testsrc2', 'smptebars', 'smptehdbars', 'color', 'nullsrc',
+    'rgbtestsrc', 'yuvtestsrc', 'sine', 'anoisesrc', 'aevalsrc', 'anullsrc',
+    'allrgb', 'allyuv', 'pal75bars', 'pal100bars', 'gradients', 'life',
+    'cellauto', 'mandelbrot', 'mptestsrc', 'haldclutsrc', 'flite',
+}
 
 
 def _is_frozen() -> bool:
@@ -46,6 +60,64 @@ def split_command(cmd: str) -> list:
             p = p[1:-1].replace('""', '"')
         result.append(p)
     return result
+
+
+def _validate_input(value: str) -> bool:
+    """校验 -i 输入源：
+    - 虚拟源(lavfi/testsrc/color 等)放行
+    - 网络协议(http/https/rtmp...)一律拒绝(防 SSRF)
+    - 本地路径必须落在 UPLOAD/DOWNLOAD 目录内(防任意文件读取)
+    """
+    v = (value or '').strip()
+    if not v:
+        return False
+    source = v.split('=')[0].split(':')[0]
+    if source in VIRTUAL_SOURCES:
+        return True
+    if '://' in v:
+        if v.startswith('file://'):
+            v = v[len('file://'):]
+        else:
+            return False
+    try:
+        real = os.path.realpath(os.path.join(os.getcwd(), v))
+    except Exception:
+        return False
+    for base in (os.path.realpath(UPLOAD), os.path.realpath(DOWNLOAD)):
+        if real == base or real.startswith(base + os.sep):
+            return True
+    return False
+
+
+def _check_inputs(parts: list) -> list:
+    """返回所有非法输入源列表(空列表表示全部合法)。"""
+    denied = []
+    for i, p in enumerate(parts):
+        if p == '-i' and i + 1 < len(parts):
+            if not _validate_input(parts[i + 1]):
+                denied.append(parts[i + 1])
+    return denied
+
+
+def _run_binary(run_parts: list, timeout: int, label: str):
+    """执行 ffmpeg/ffprobe 并返回 (returncode, stdout_str, stderr_str)。
+    - stdin 指向空设备,避免 ffmpeg 的 Overwrite 等交互提示阻塞
+    - 输出写入临时文件(避免管道写满死锁),轮询等待,超时强制 kill
+    """
+    with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
+        proc = subprocess.Popen(args=run_parts, stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr)
+        deadline = time.monotonic() + timeout
+        while proc.poll() is None:
+            if time.monotonic() > deadline:
+                proc.kill()
+                proc.wait()
+                ferr.seek(0)
+                err_tail = ferr.read().decode(errors='replace')[-2000:]
+                raise TimeoutError(f'{label} 执行超过 {timeout} 秒，已强制终止。{err_tail}')
+            time.sleep(0.2)
+        fout.seek(0)
+        ferr.seek(0)
+        return proc.returncode, fout.read().decode(errors='replace'), ferr.read().decode(errors='replace')
 
 
 @tool
@@ -158,19 +230,32 @@ def execute_command(command: str, config: RunnableConfig):
 
     try:
         run_parts = split_command(command)
+        # 输入源安全校验：只允许 UPLOAD/DOWNLOAD 内的文件或 lavfi 虚拟源
+        denied = _check_inputs(run_parts)
+        if denied:
+            return {
+                'command': command,
+                'command_result': '拒绝执行：输入源不在允许目录内或使用了被禁止的网络协议：'
+                                 + '、'.join(denied) + '。请只使用 get_files 返回的文件。',
+            }
         run_parts[0] = ffmpeg_bin('ffmpeg')
-        exit_code = subprocess.run(args=run_parts, capture_output=True)
-        if exit_code.returncode == 0:
+        returncode, _, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffmpeg')
+        if returncode == 0:
             return {'command': command, 'flag': True, 'command_result': f'{command} 执行成功'}
         else:
             return {
                 'command': command,
-                'command_result': f'{command} 执行失败：{exit_code.stderr.decode(errors="replace")}',
+                'command_result': f'{command} 执行失败：{stderr[-2000:]}',
             }
     except OSError as e:
         return {
             'command': command,
             'command_result': f'命令执行异常：{e}',
+        }
+    except TimeoutError as e:
+        return {
+            'command': command,
+            'command_result': f'命令执行超时：{e}',
         }
 
 
@@ -196,10 +281,18 @@ def execute_probe_command(command: str):
 
     try:
         run_parts = split_command(command)
+        # 输入源安全校验(与 ffmpeg 相同)：防 SSRF 与任意文件读取
+        denied = _check_inputs(run_parts)
+        if denied:
+            return {
+                'command': command,
+                'command_result': '拒绝执行：输入源不在允许目录内或使用了被禁止的网络协议：'
+                                 + '、'.join(denied) + '。请只使用 get_files 返回的文件。',
+            }
         run_parts[0] = ffmpeg_bin('ffprobe')
-        proc = subprocess.run(args=run_parts, capture_output=True)
-        if proc.returncode == 0:
-            output = proc.stdout.decode(errors='replace').strip()
+        returncode, stdout, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffprobe')
+        if returncode == 0:
+            output = stdout.strip()
             return {
                 'command': command,
                 'flag': True,
@@ -208,10 +301,15 @@ def execute_probe_command(command: str):
         else:
             return {
                 'command': command,
-                'command_result': f'{command} 执行失败：{proc.stderr.decode(errors="replace")}',
+                'command_result': f'{command} 执行失败：{stderr[-2000:]}',
             }
     except OSError as e:
         return {
             'command': command,
             'command_result': f'命令执行异常：{e}',
+        }
+    except TimeoutError as e:
+        return {
+            'command': command,
+            'command_result': f'命令执行超时：{e}',
         }
