@@ -1,5 +1,12 @@
+"""执行图：ffmpeg（search→execute 循环）与 ffprobe 两套变体。
+
+两套图的差异只有「agents、日志措辞、是否记录输出文件」，因此用 GraphSpec +
+节点工厂参数化构建；同时保留原有模块级名称（exec_graph、probe_exec_graph、
+search、probe_search、build_chat_prompt …）作为兼容入口。
+"""
 import os, json, logging
-from app.agents import ensure_agents, ensure_probe_agents
+import app.agents as agents_mod
+from app.agents import FFMPEG_SPEC, PROBE_SPEC
 from app.tools import split_command, find_output_indexes
 from langgraph.graph import START, END, StateGraph, MessagesState
 from langchain.messages import ToolMessage, AnyMessage, AIMessage, HumanMessage
@@ -36,89 +43,162 @@ def _check_cancelled(state: state):
         raise GraphCancelled('任务已被用户停止')
 
 
-def search(state: state):
-    if not ensure_agents():
-        raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
+def _as_text(content) -> str:
+    """把消息内容统一成字符串。
 
-    _check_cancelled(state)
+    约定：state['result'] 与 state['command_result'] 始终是 str。
+    消息 content 在两种情况下不是 str：
+      - 多模态模型返回 list[dict]（如 [{'type':'text','text':...}]）
+      - 上游直接塞了非字符串对象
+    此前 search 触达上限时把 result 写成 list，下游 build_chat_prompt 会把
+    Python 列表字面量（"['...']"）拼进提示词；这里统一收敛为 str。
+    """
+    if content is None:
+        return ''
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get('text') or item.get('content')
+                if isinstance(text, str):
+                    parts.append(text)
+        return '\n'.join(p for p in parts if p)
+    return str(content)
 
-    from app.agents import agent_search
 
-    if state.get('progress') is not None:
-        state['progress'].append('正在查询知识库...')
+class GraphSpec:
+    """一套执行图的声明式定义（ffmpeg / ffprobe 的差异集中在此）。"""
 
-    if state.get('search_count', 0) >= MAX_SEARCH_COUNT:
-        logger.info(f'查询次数已达上限（{MAX_SEARCH_COUNT} 次），跳过后续查询')
-        return {
-            **state,
-            'result': [f'已达到最大查询次数（{MAX_SEARCH_COUNT} 次），请基于现有信息继续'],
-        }
-    logger.info('执行查询')
-    mes = state['messages']
-    state['history'] = mes
-    if state['flag'] or state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
+    def __init__(self, name, agent_prefix, ensure_attr, search_progress,
+                 execute_progress, log_prefix, capture_output):
+        self.name = name
+        # agent 属性名前缀，如 'agent' → agent_search/agent_execute
+        self.agent_prefix = agent_prefix
+        # 模块级 ensure 函数名，如 'ensure_agents'
+        self.ensure_attr = ensure_attr
+        self.search_progress = search_progress
+        self.execute_progress = execute_progress
+        self.log_prefix = log_prefix
+        # ffprobe 只读，不产生输出文件
+        self.capture_output = capture_output
+        self.compiled = None
+
+    def ensure(self):
+        return getattr(agents_mod, self.ensure_attr)()
+
+    def agent(self, role: str):
+        """按需取当前 agent 实例（rebuild_agents 后仍能拿到最新对象）。"""
+        return getattr(agents_mod, f'{self.agent_prefix}_{role}')
+
+    def log(self, msg: str):
+        logger.info(f'{self.log_prefix}{msg}' if self.log_prefix else msg)
+
+
+def _make_search_node(spec: GraphSpec):
+    """构建 search / probe_search 节点。"""
+
+    def _search(state: state):
+        _check_cancelled(state)
+
+        if state.get('progress') is not None:
+            state['progress'].append(spec.search_progress)
+
+        # 上限检查放在 LLM 配置检查之前：这是纯粹的计数判断，
+        # 不需要 agents，也不该在未配置 LLM 时因它而抛错。
+        if state.get('search_count', 0) >= MAX_SEARCH_COUNT:
+            spec.log(f'查询次数已达上限（{MAX_SEARCH_COUNT} 次），跳过后续查询')
+            return {
+                **state,
+                'result': f'已达到最大查询次数（{MAX_SEARCH_COUNT} 次），请基于现有信息继续',
+            }
+
+        if not spec.ensure():
+            raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
+
+        spec.log('执行查询')
+        mes = state['messages']
+        state['history'] = mes
+        if state['flag'] or state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
+            return state
+        # 多轮对话：把历史上下文作为参考消息前置(不要求其回答历史问题)
+        context_msgs = []
+        if state.get('context'):
+            context_msgs = [HumanMessage(
+                content=f'对话历史（仅供参考，请结合当前问题理解用户意图）：\n{state["context"]}')]
+        if state['command'] is not None:
+            res = spec.agent('search').invoke(
+                {'messages': [*context_msgs, *mes, HumanMessage(content=state.get('command_result', ''))]})
+        else:
+            res = spec.agent('search').invoke({'messages': [*context_msgs, *mes]})
+        state['result'] = _as_text(res['messages'][-1].content)
+        state['search_count'] = state.get('search_count', 0) + 1
         return state
-    # 多轮对话：把历史上下文作为参考消息前置(不要求其回答历史问题)
-    context_msgs = []
-    if state.get('context'):
-        context_msgs = [HumanMessage(content=f'对话历史（仅供参考，请结合当前问题理解用户意图）：\n{state["context"]}')]
-    if state['command'] is not None:
-        res = agent_search.invoke({'messages': [*context_msgs, *mes, HumanMessage(content=state.get('command_result', ''))]})
-    else:
-        res = agent_search.invoke({'messages': [*context_msgs, *mes]})
-    state['result'] = res['messages'][-1].content
-    state['search_count'] = state.get('search_count', 0) + 1
-    return state
+
+    return _search
 
 
-def execute(state: state):
-    if not ensure_agents():
-        raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
+def _make_execute_node(spec: GraphSpec):
+    """构建 execute / probe_execute 节点。"""
 
-    _check_cancelled(state)
+    def _execute(state: state):
+        if not spec.ensure():
+            raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
 
-    from app.agents import agent_execute
+        _check_cancelled(state)
 
-    if state.get('progress') is not None:
-        state['progress'].append('正在执行命令...')
+        if state.get('progress') is not None:
+            state['progress'].append(spec.execute_progress)
 
-    logger.info('执行命令')
-    state['execute_count'] = state.get('execute_count', 0) + 1
-    logger.info(f'执行次数：{state["execute_count"]}/{MAX_EXECUTE_COUNT}')
-    history_msgs = state.get('history') or []
-    user_question = history_msgs[0].content if history_msgs else ''
-    execute_prompt = (
-        f'用户问题：{user_question}\n\n'
-        f'知识库检索结果：{state.get("result", "")}'
-    )
-    if state.get('context'):
-        execute_prompt += f'\n\n对话历史（仅供参考）：\n{state["context"]}'
-    res = agent_execute.invoke(
-        {'messages': [HumanMessage(content=execute_prompt)]},
-        config={'configurable': {
+        spec.log('执行命令')
+        state['execute_count'] = state.get('execute_count', 0) + 1
+        spec.log(f'执行次数：{state["execute_count"]}/{MAX_EXECUTE_COUNT}')
+
+        history_msgs = state.get('history') or []
+        user_question = history_msgs[0].content if history_msgs else ''
+        execute_prompt = (
+            f'用户问题：{user_question}\n\n'
+            f'知识库检索结果：{state.get("result", "")}'
+        )
+        if state.get('context'):
+            execute_prompt += f'\n\n对话历史（仅供参考）：\n{state["context"]}'
+
+        configurable = {
             'selected_files': state.get('files') or [],
             'stop_event': state.get('stop_event'),
             'proc': state.get('proc_box'),
-            'progress': state.get('progress'),
-        }},
-    )
-    for msg in reversed(res['messages']):
-        if isinstance(msg, ToolMessage):
-            try:
-                data = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
-                if isinstance(data, dict):
-                    state['command'] = data.get('command', state.get('command', ''))
-                    state['flag'] = data.get('flag', False)
-                    state['command_result'] = data.get('command_result', '')
-                    if data.get('flag') and data.get('command'):
-                        parts = split_command(data['command'])
-                        idxs = find_output_indexes(parts)
-                        if idxs:
-                            state['output_file'] = os.path.basename(parts[idxs[-1]])
-            except Exception as e:
-                logger.warning(f'解析 execute 工具返回失败：{e}')
-            break
-    return state
+        }
+        # 仅 ffmpeg 需要进度回调（ffprobe 无转码进度）
+        if spec.capture_output:
+            configurable['progress'] = state.get('progress')
+
+        res = spec.agent('execute').invoke(
+            {'messages': [HumanMessage(content=execute_prompt)]},
+            config={'configurable': configurable},
+        )
+
+        for msg in reversed(res['messages']):
+            if isinstance(msg, ToolMessage):
+                try:
+                    data = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
+                    if isinstance(data, dict):
+                        state['command'] = _as_text(data.get('command', state.get('command', '')))
+                        state['flag'] = data.get('flag', False)
+                        state['command_result'] = _as_text(data.get('command_result', ''))
+                        if spec.capture_output and data.get('flag') and data.get('command'):
+                            parts = split_command(data['command'])
+                            idxs = find_output_indexes(parts)
+                            if idxs:
+                                state['output_file'] = os.path.basename(parts[idxs[-1]])
+                except Exception as e:
+                    spec.log(f'解析 execute 工具返回失败：{e}')
+                break
+        return state
+
+    return _execute
 
 
 def which_continue_exec(state: state):
@@ -139,25 +219,25 @@ def which_continue_exec(state: state):
     return branch
 
 
-# ── 执行图（search + execute 循环，不含 chat） ──
-exec_workflow = StateGraph(state_schema=state)
-exec_workflow.add_node('search', search)
-exec_workflow.add_node('execute', execute)
-exec_workflow.add_edge(START, 'search')
-exec_workflow.add_edge('execute', 'search')
-exec_workflow.add_conditional_edges(
-    'search',
-    which_continue_exec,
-    {END: END, 'execute': 'execute'},
-)
-# 模块加载时编译一次,避免每个请求重复 compile()
-_compiled_exec = exec_workflow.compile()
+def _build_graph(spec: GraphSpec):
+    """构建并编译一张执行图（模块加载时各调用一次，请求内复用）。"""
+    workflow = StateGraph(state_schema=state)
+    workflow.add_node('search', _make_search_node(spec))
+    workflow.add_node('execute', _make_execute_node(spec))
+    workflow.add_edge(START, 'search')
+    workflow.add_edge('execute', 'search')
+    workflow.add_conditional_edges(
+        'search',
+        which_continue_exec,
+        {END: END, 'execute': 'execute'},
+    )
+    return workflow.compile()
 
 
-def exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
+def _run_graph(spec: GraphSpec, question: str, progress=None, files=None, context='',
                stop_event=None, proc_box=None) -> dict:
-    logger.info(f'开始执行，用户问题：{question}')
-    result = _compiled_exec.invoke({
+    spec.log(f'开始执行，用户问题：{question}')
+    return spec.compiled.invoke({
         "messages": [HumanMessage(content=question)],
         "command": None,
         "result": "",
@@ -173,11 +253,9 @@ def exec_graph(question: str, progress: list = None, files: list = None, context
         "stop_event": stop_event,
         "proc_box": proc_box,
     })
-    return result
 
 
-def build_chat_prompt(state: dict) -> str:
-    """根据执行状态构建 chat agent 的输入提示。"""
+def _build_chat_prompt(state: dict, include_output_file: bool = True) -> str:
     history_msgs = state.get('history') or []
     user_question = history_msgs[0].content if history_msgs else ''
     prompt = (
@@ -190,154 +268,92 @@ def build_chat_prompt(state: dict) -> str:
         prompt += f'\n执行的命令：{state["command"]}'
     if state.get('command_result'):
         prompt += f'\n命令执行结果：{state["command_result"]}'
-    if state.get('output_file'):
+    if include_output_file and state.get('output_file'):
         prompt += f'\n输出文件：{state["output_file"]}'
     if state.get('files'):
         prompt += f'\n选择处理的文件：{", ".join(os.path.basename(f) for f in state["files"])}'
     return prompt
 
 
-# ── ffprobe 执行图（probe_search + probe_execute 循环，不含 chat） ──
+# ── 变体声明 ──
 
-def probe_search(state: state):
-    if not ensure_probe_agents():
-        raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
-
-    _check_cancelled(state)
-
-    from app.agents import agent_probe_search
-
-    if state.get('progress') is not None:
-        state['progress'].append('正在查询 ffprobe 知识库...')
-
-    if state.get('search_count', 0) >= MAX_SEARCH_COUNT:
-        logger.info(f'ffprobe 查询次数已达上限（{MAX_SEARCH_COUNT} 次），跳过后续查询')
-        return {
-            **state,
-            'result': [f'已达到最大查询次数（{MAX_SEARCH_COUNT} 次），请基于现有信息继续'],
-        }
-    logger.info('执行 ffprobe 查询')
-    mes = state['messages']
-    state['history'] = mes
-    if state['flag'] or state.get('execute_count', 0) >= MAX_EXECUTE_COUNT:
-        return state
-    context_msgs = []
-    if state.get('context'):
-        context_msgs = [HumanMessage(content=f'对话历史（仅供参考，请结合当前问题理解用户意图）：\n{state["context"]}')]
-    if state['command'] is not None:
-        res = agent_probe_search.invoke({'messages': [*context_msgs, *mes, HumanMessage(content=state.get('command_result', ''))]})
-    else:
-        res = agent_probe_search.invoke({'messages': [*context_msgs, *mes]})
-    state['result'] = res['messages'][-1].content
-    state['search_count'] = state.get('search_count', 0) + 1
-    return state
-
-
-def probe_execute(state: state):
-    if not ensure_probe_agents():
-        raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
-
-    _check_cancelled(state)
-
-    from app.agents import agent_probe_execute
-
-    if state.get('progress') is not None:
-        state['progress'].append('正在执行 ffprobe 命令...')
-
-    logger.info('执行 ffprobe 命令')
-    state['execute_count'] = state.get('execute_count', 0) + 1
-    logger.info(f'执行次数：{state["execute_count"]}/{MAX_EXECUTE_COUNT}')
-    history_msgs = state.get('history') or []
-    user_question = history_msgs[0].content if history_msgs else ''
-    execute_prompt = (
-        f'用户问题：{user_question}\n\n'
-        f'知识库检索结果：{state.get("result", "")}'
-    )
-    if state.get('context'):
-        execute_prompt += f'\n\n对话历史（仅供参考）：\n{state["context"]}'
-    res = agent_probe_execute.invoke(
-        {'messages': [HumanMessage(content=execute_prompt)]},
-        config={'configurable': {
-            'selected_files': state.get('files') or [],
-            'stop_event': state.get('stop_event'),
-            'proc': state.get('proc_box'),
-        }},
-    )
-    for msg in reversed(res['messages']):
-        if isinstance(msg, ToolMessage):
-            try:
-                data = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
-                if isinstance(data, dict):
-                    state['command'] = data.get('command', state.get('command', ''))
-                    state['flag'] = data.get('flag', False)
-                    state['command_result'] = data.get('command_result', '')
-            except Exception as e:
-                logger.warning(f'解析 probe_execute 工具返回失败：{e}')
-            break
-    return state
-
-
-probe_exec_workflow = StateGraph(state_schema=state)
-probe_exec_workflow.add_node('search', probe_search)
-probe_exec_workflow.add_node('execute', probe_execute)
-probe_exec_workflow.add_edge(START, 'search')
-probe_exec_workflow.add_edge('execute', 'search')
-probe_exec_workflow.add_conditional_edges(
-    'search',
-    which_continue_exec,
-    {END: END, 'execute': 'execute'},
+FFMPEG_GRAPH = GraphSpec(
+    name='ffmpeg',
+    agent_prefix='agent',
+    ensure_attr='ensure_agents',
+    search_progress='正在查询知识库...',
+    execute_progress='正在执行命令...',
+    log_prefix='',
+    capture_output=True,
 )
-# 模块加载时编译一次,避免每个请求重复 compile()
-_compiled_probe_exec = probe_exec_workflow.compile()
+
+PROBE_GRAPH = GraphSpec(
+    name='ffprobe',
+    agent_prefix='agent_probe',
+    ensure_attr='ensure_probe_agents',
+    search_progress='正在查询 ffprobe 知识库...',
+    execute_progress='正在执行 ffprobe 命令...',
+    log_prefix='ffprobe ',
+    capture_output=False,
+)
+
+# 模块加载时各编译一次,避免每个请求重复 compile()
+FFMPEG_GRAPH.compiled = _build_graph(FFMPEG_GRAPH)
+PROBE_GRAPH.compiled = _build_graph(PROBE_GRAPH)
+
+
+# ── 公开入口（保持既有签名）──
+
+def exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
+               stop_event=None, proc_box=None) -> dict:
+    return _run_graph(FFMPEG_GRAPH, question, progress, files, context, stop_event, proc_box)
 
 
 def probe_exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
                      stop_event=None, proc_box=None) -> dict:
-    logger.info(f'开始执行 ffprobe 任务，用户问题：{question}')
-    result = _compiled_probe_exec.invoke({
-        "messages": [HumanMessage(content=question)],
-        "command": None,
-        "result": "",
-        "command_result": "",
-        "history": [],
-        "flag": False,
-        "output_file": "",
-        "search_count": 0,
-        "execute_count": 0,
-        "progress": progress,
-        "files": files or [],
-        "context": context or '',
-        "stop_event": stop_event,
-        "proc_box": proc_box,
-    })
-    return result
+    return _run_graph(PROBE_GRAPH, question, progress, files, context, stop_event, proc_box)
+
+
+def build_chat_prompt(state: dict) -> str:
+    """根据执行状态构建 chat agent 的输入提示。"""
+    return _build_chat_prompt(state, include_output_file=True)
 
 
 def build_probe_chat_prompt(state: dict) -> str:
-    """根据 ffprobe 执行状态构建 chat agent 的输入提示。"""
-    history_msgs = state.get('history') or []
-    user_question = history_msgs[0].content if history_msgs else ''
-    prompt = (
-        f'用户问题：{user_question}\n\n'
-        f'知识库检索结果：{state.get("result", "")}\n'
-    )
-    if state.get('context'):
-        prompt += f'\n对话历史（仅供参考）：\n{state["context"]}'
-    if state.get('command'):
-        prompt += f'\n执行的命令：{state["command"]}'
-    if state.get('command_result'):
-        prompt += f'\n命令执行结果：{state["command_result"]}'
-    if state.get('files'):
-        prompt += f'\n选择处理的文件：{", ".join(os.path.basename(f) for f in state["files"])}'
-    return prompt
+    """根据 ffprobe 执行状态构建 chat agent 的输入提示（无输出文件概念）。"""
+    return _build_chat_prompt(state, include_output_file=False)
+
+
+# 兼容既有调用方与测试的名称
+search = _make_search_node(FFMPEG_GRAPH)
+execute = _make_execute_node(FFMPEG_GRAPH)
+probe_search = _make_search_node(PROBE_GRAPH)
+probe_execute = _make_execute_node(PROBE_GRAPH)
+
+exec_workflow = FFMPEG_GRAPH.compiled
+probe_exec_workflow = PROBE_GRAPH.compiled
+
+
+def chat_agent_for(is_probe: bool):
+    """返回对应变体的 chat agent（供 __main__ 与路由使用）。"""
+    agents_mod.ensure_probe_agents() if is_probe else agents_mod.ensure_agents()
+    return agents_mod.agent_probe_chat if is_probe else agents_mod.agent_chat
+
+
+def get_chat_agent(kind: str = ''):
+    """按 kind（'' = ffmpeg，'ffprobe' = ffprobe）取 chat agent。
+
+    在请求期读取模块属性，因此 rebuild_agents() 之后拿到的是最新实例。
+    """
+    return chat_agent_for(kind.strip() == 'ffprobe')
 
 
 if __name__ == '__main__':
     import sys
-    if not ensure_agents():
+    if not FFMPEG_GRAPH.ensure():
         print('错误：LLM 未配置，请先设置 MODEL_NAME、BASE_URL、API_KEY')
         sys.exit(1)
-    if not ensure_probe_agents():
+    if not PROBE_GRAPH.ensure():
         print('错误：ffprobe agent 创建失败')
         sys.exit(1)
     args = sys.argv[1:]
@@ -348,9 +364,7 @@ if __name__ == '__main__':
     exec_state = probe_exec_graph(q) if is_probe else exec_graph(q)
     prompt = build_probe_chat_prompt(exec_state) if is_probe else build_chat_prompt(exec_state)
 
-    from app.agents import agent_chat, agent_probe_chat
-    chat_agent = agent_probe_chat if is_probe else agent_chat
-    res = chat_agent.invoke({'messages': [HumanMessage(content=prompt)]})
+    res = chat_agent_for(is_probe).invoke({'messages': [HumanMessage(content=prompt)]})
     reply = res['messages'][-1].content if 'messages' in res else str(res)
     logger.info(f"AI: {reply}")
     if exec_state.get('output_file'):

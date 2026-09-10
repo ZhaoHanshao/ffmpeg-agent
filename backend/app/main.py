@@ -1,4 +1,4 @@
-import os, sys, shutil, json, re, io, zipfile, datetime, logging, asyncio, threading, traceback, secrets
+import os, sys, shutil, json, re, io, zipfile, datetime, logging, asyncio, threading, time, traceback, secrets
 from contextlib import asynccontextmanager
 
 # ── 冻结模式（PyInstaller 打包）预处理 ──
@@ -55,6 +55,7 @@ exec_graph = _graph_mod.exec_graph
 build_chat_prompt = _graph_mod.build_chat_prompt
 probe_exec_graph = _graph_mod.probe_exec_graph
 build_probe_chat_prompt = _graph_mod.build_probe_chat_prompt
+get_chat_agent = _graph_mod.get_chat_agent
 GraphCancelled = _graph_mod.GraphCancelled
 
 _agents_mod = _step_import('app.agents', 'app.agents')
@@ -123,15 +124,35 @@ async def auth_middleware(request: Request, call_next):
 # 初始化状态：冻结模式下预加载在后台线程执行，健康检查据此返回状态
 _init_state = {'status': 'running', 'progress': 0, 'step': '启动中', 'error': None}  # running / ok / error
 
-# 运行中的聊天任务:job_id → {'stop': threading.Event, 'proc': [Popen|None]},用于真实取消
+# 运行中的聊天任务:job_id → {'stop', 'proc', 'owner', 'created_at', 'kind'},用于真实取消
 _jobs = {}
 _jobs_lock = threading.Lock()
 
+# 任务记录的最长保留时间(秒)。正常路径会在流结束时注销；
+# 这里兜底清理"客户端在流开始消费前就断开"等导致注册后无人注销的记录，
+# 避免 _jobs 随请求数无限增长。
+JOB_TTL_SECONDS = int(os.getenv('JOB_TTL_SECONDS', '7200') or 7200)
 
-def _register_job():
+
+def _register_job(kind: str, owner: str = ''):
     job_id = os.urandom(6).hex()
-    job = {'stop': threading.Event(), 'proc': [None]}
+    now = time.time()
+    job = {
+        'stop': threading.Event(),
+        'proc': [None],
+        # 归属标识：/api/chat/stop 需要校验，避免任意客户端凭 job_id 终止他人任务
+        'owner': owner or job_id,
+        'created_at': now,
+        'kind': kind,
+    }
     with _jobs_lock:
+        # 顺手清理过期记录（无需额外线程）
+        expired = [k for k, v in _jobs.items()
+                   if now - v.get('created_at', now) > JOB_TTL_SECONDS]
+        for k in expired:
+            _jobs.pop(k, None)
+        if expired:
+            logger.info(f'清理 {len(expired)} 个过期任务记录')
         _jobs[job_id] = job
     return job_id, job
 
@@ -141,10 +162,15 @@ def _unregister_job(job_id: str):
         _jobs.pop(job_id, None)
 
 
-def _stop_job(job_id: str) -> bool:
+def _stop_job(job_id: str, owner: str = '') -> bool:
     with _jobs_lock:
         job = _jobs.get(job_id)
     if not job:
+        return False
+    # 归属校验：owner 不匹配时拒绝（job_id 本身即服务端签发的凭证，
+    # 发起方始终持有它；伪造/猜测的 id 无法通过）
+    if owner and job.get('owner') and not secrets.compare_digest(str(job['owner']), str(owner)):
+        logger.warning(f'拒绝停止任务 {job_id}：归属不匹配')
         return False
     job['stop'].set()
     proc = job['proc'][0]
@@ -207,12 +233,6 @@ async def lifespan(_app: FastAPI):
 app.router.lifespan_context = lifespan
 
 
-def _clear_dir(path: str):
-    if os.path.exists(path):
-        shutil.rmtree(path)
-    os.makedirs(path, exist_ok=True)
-
-
 def _safe_path(base: str, name: str):
     """将 name 约束到 base 目录内(防路径穿越)。
 
@@ -262,19 +282,42 @@ def _save_with_timestamp(file: UploadFile, seq: int) -> str:
 
 @app.post("/api/upload")
 async def upload_files(files: list[UploadFile] = File(...)):
-    """上传一个或多个文件到 upload/，不会删除旧文件"""
+    """上传一个或多个文件到 upload/，不会删除旧文件。
+
+    整批上传按"先全量校验、再落盘、失败回滚"处理：任何一个文件不合法或
+    落盘失败时，把本批已写入的文件删掉，避免留下半批"幽灵文件"
+    （此前中途 415/写入失败会让前面的文件残留在 upload/ 且前端收不到列表）。
+    """
     logger.info('上传文件')
     logger.info(f'文件数量：{len(files)}')
-    saved = []
-    counter = {}
-    for f in files:
-        name = f.filename or "file"
-        if UPLOAD_EXT_WHITELIST:
+
+    # 阶段一：全量校验，避免写到一半才发现某个文件不合法
+    if UPLOAD_EXT_WHITELIST:
+        for f in files:
+            name = f.filename or "file"
             ext = os.path.splitext(name)[1].lower().lstrip('.')
             if not ext or ext not in UPLOAD_EXT_WHITELIST:
                 raise HTTPException(status_code=415, detail=f'不支持的文件类型：{ext or "(无扩展名)"}')
-        counter[name] = counter.get(name, 0) + 1
-        saved.append(_save_with_timestamp(f, counter[name]))
+
+    # 阶段二：逐个落盘，任一失败则回滚本批已写入的文件
+    saved = []
+    counter = {}
+    try:
+        for f in files:
+            name = f.filename or "file"
+            counter[name] = counter.get(name, 0) + 1
+            saved.append(_save_with_timestamp(f, counter[name]))
+    except Exception:
+        for name in saved:
+            path = os.path.join(UPLOAD_DIR, name)
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError as e:
+                logger.warning(f'回滚上传文件失败：{path}（{e}）')
+        logger.warning(f'上传失败，已回滚 {len(saved)} 个文件')
+        raise
+
     logger.info(f'保存文件：{saved}')
     return {"uploaded": saved}
 
@@ -376,79 +419,65 @@ def _build_context(history: list[str]) -> str:
     return '\n'.join(entries[-6:])[:4000]
 
 
-@app.post("/api/chat")
-async def chat(question: str = Form(...), files: list[str] = Form(default=[]), history: list[str] = Form(default=[])):
-    """发送问题 → 流式输出（ffmpeg search+execute 进度 + chat 逐 token）"""
-    if _init_state['status'] == 'running':
-        return Response(
-            content=f"data: {json.dumps({'event': 'error', 'text': '正在初始化知识库（首次运行需下载模型，请稍候）'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
-            media_type="text/event-stream",
-        )
+def _sse_error(text: str) -> Response:
+    """以 SSE 形式返回一条错误并结束（用于初始化中 / LLM 未配置等前置失败）。"""
+    return Response(
+        content=(f"data: {json.dumps({'event': 'error', 'text': text})}\n\n"
+                 f"data: {json.dumps({'event': 'done'})}\n\n"),
+        media_type="text/event-stream",
+    )
 
-    if not ensure_agents():
-        return Response(
-            content=f"data: {json.dumps({'event': 'error', 'text': 'LLM 未配置，请先在页面右上角 ⚙️ 设置中填写模型信息'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
-            media_type="text/event-stream",
-        )
+
+def _chat_response(question, files, history, *, kind, graph_fn, ensure_fn, prompt_builder):
+    """两个 chat 路由的公共实现（ffmpeg / ffprobe 仅参数不同）。"""
+    if _init_state['status'] == 'running':
+        return _sse_error('正在初始化知识库（首次运行需下载模型，请稍候）')
+
+    if not ensure_fn():
+        return _sse_error('LLM 未配置，请先在页面右上角 ⚙️ 设置中填写模型信息')
 
     selected = _sanitize_selected_files(files)
 
-    logger.info('处理对话')
+    logger.info(f'处理{kind}对话')
     logger.info(f'用户问题：{question[:200]}')
     logger.info(f'选择文件：{selected}')
 
-    from app.agents import agent_chat
-
     context = _build_context(history)
-    job_id, job = _register_job()
+    job_id, job = _register_job(kind)
     return StreamingResponse(
         _event_stream(
             question,
-            lambda q, p: exec_graph(q, p, files=selected, context=context,
-                                    stop_event=job['stop'], proc_box=job['proc']),
-            agent_chat,
-            build_chat_prompt,
+            lambda q, p: graph_fn(q, p, files=selected, context=context,
+                                  stop_event=job['stop'], proc_box=job['proc']),
+            get_chat_agent(kind),
+            prompt_builder,
             job={'job_id': job_id, **job},
         ),
         media_type="text/event-stream",
     )
 
 
+@app.post("/api/chat")
+async def chat(question: str = Form(...), files: list[str] = Form(default=[]), history: list[str] = Form(default=[])):
+    """发送问题 → 流式输出（ffmpeg search+execute 进度 + chat 逐 token）"""
+    return _chat_response(
+        question, files, history,
+        kind='',
+        graph_fn=exec_graph,
+        ensure_fn=ensure_agents,
+        prompt_builder=build_chat_prompt,
+    )
+
+
 @app.post("/api/probe/chat")
 async def probe_chat(question: str = Form(...), files: list[str] = Form(default=[]), history: list[str] = Form(default=[])):
     """发送问题 → 流式输出（ffprobe search+execute 进度 + chat 逐 token）"""
-    if _init_state['status'] == 'running':
-        return Response(
-            content=f"data: {json.dumps({'event': 'error', 'text': '正在初始化知识库（首次运行需下载模型，请稍候）'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
-            media_type="text/event-stream",
-        )
-
-    if not ensure_probe_agents():
-        return Response(
-            content=f"data: {json.dumps({'event': 'error', 'text': 'LLM 未配置，请先在页面右上角 ⚙️ 设置中填写模型信息'})}\n\ndata: {json.dumps({'event': 'done'})}\n\n",
-            media_type="text/event-stream",
-        )
-
-    selected = _sanitize_selected_files(files)
-
-    logger.info('处理 ffprobe 对话')
-    logger.info(f'用户问题：{question[:200]}')
-    logger.info(f'选择文件：{selected}')
-
-    from app.agents import agent_probe_chat
-
-    context = _build_context(history)
-    job_id, job = _register_job()
-    return StreamingResponse(
-        _event_stream(
-            question,
-            lambda q, p: probe_exec_graph(q, p, files=selected, context=context,
-                                          stop_event=job['stop'], proc_box=job['proc']),
-            agent_probe_chat,
-            build_probe_chat_prompt,
-            job={'job_id': job_id, **job},
-        ),
-        media_type="text/event-stream",
+    return _chat_response(
+        question, files, history,
+        kind='ffprobe ',
+        graph_fn=probe_exec_graph,
+        ensure_fn=ensure_probe_agents,
+        prompt_builder=build_probe_chat_prompt,
     )
 
 
@@ -458,18 +487,39 @@ async def stop_chat(body: dict):
     job_id = (body or {}).get('job_id', '')
     if not job_id:
         raise HTTPException(status_code=400, detail="缺少 job_id")
-    stopped = _stop_job(job_id)
-    logger.info(f'停止任务 {job_id}：{"已停止" if stopped else "任务不存在或已结束"}')
+    # owner 由发起方持有（前端始终回传同一个 job_id），用于拒绝他人冒用 job_id 停止任务
+    owner = (body or {}).get('owner', '') or job_id
+    stopped = _stop_job(job_id, owner)
+    logger.info(f'停止任务 {job_id}：{"已停止" if stopped else "任务不存在/已结束或归属不匹配"}')
     return {"stopped": stopped}
+
+
+def _list_dir_newest_first(path: str) -> list[str]:
+    """列出目录下的文件名，按修改时间倒序（最新在前）。
+
+    os.listdir 的顺序由文件系统决定（NTFS 上约等于名字序），新产物会随机插在中间，
+    用户难以发现刚生成的文件；按 mtime 倒序让上传/输出列表稳定地把最新项排在最前。
+    """
+    if not os.path.isdir(path):
+        return []
+    entries = []
+    for name in os.listdir(path):
+        full = os.path.join(path, name)
+        try:
+            if os.path.isfile(full):
+                entries.append((os.path.getmtime(full), name))
+        except OSError:
+            # 列目录期间文件被删除/占用：跳过，不要让整个列表失败
+            continue
+    entries.sort(key=lambda t: (-t[0], t[1]))
+    return [name for _, name in entries]
 
 
 @app.get("/api/output")
 async def list_output():
-    """列出 download/ 中的已完成文件"""
+    """列出 download/ 中的已完成文件（最新在前）"""
     logger.info('列出已完成文件')
-    if not os.path.exists(DOWNLOAD_DIR):
-        return {"files": []}
-    files = [f for f in os.listdir(DOWNLOAD_DIR) if os.path.isfile(os.path.join(DOWNLOAD_DIR, f))]
+    files = _list_dir_newest_first(DOWNLOAD_DIR)
     logger.info(f'文件列表：{files}')
     return {"files": files}
 
@@ -531,11 +581,9 @@ async def get_output(filename: str):
 
 @app.get("/api/upload")
 async def list_uploaded():
-    """列出 upload/ 中的文件"""
+    """列出 upload/ 中的文件（最新在前）"""
     logger.info('列出上传文件')
-    if not os.path.exists(UPLOAD_DIR):
-        return {"files": []}
-    files = [f for f in os.listdir(UPLOAD_DIR) if os.path.isfile(os.path.join(UPLOAD_DIR, f))]
+    files = _list_dir_newest_first(UPLOAD_DIR)
     logger.info(f'文件列表：{files}')
     return {"files": files}
 
@@ -569,14 +617,12 @@ from fastapi.staticfiles import StaticFiles
 # ── LLM 设置 ──
 from app.model import get_model_config, update_model_config
 
-_settings_store = dict(get_model_config())
-
 
 @app.get("/api/settings/llm")
 async def get_llm_settings():
-    settings = get_model_config()
-    _settings_store.update(settings)
-    return _settings_store
+    # get_model_config() 每次都返回新 dict（api_key 已脱敏），无需再维护一份副本：
+    # 旧实现的 _settings_store 只做 update，陈旧字段会一直残留。
+    return get_model_config()
 
 
 @app.put("/api/settings/llm")
@@ -585,9 +631,7 @@ async def update_llm_settings(body: dict):
         update_model_config(body)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    cfg = get_model_config()
-    _settings_store.update(cfg)
-    return _settings_store
+    return get_model_config()
 
 
 @app.get("/api/health")

@@ -7,17 +7,20 @@ if _backend not in sys.path:
 from dotenv import load_dotenv
 load_dotenv()
 
+from app import agents as agents_mod
 from app.agents import (
     _search_prompt, _execute_prompt, _chat_prompt,
     _probe_search_prompt, _probe_execute_prompt, _probe_chat_prompt,
-    agent_search, agent_execute, agent_chat,
-    agent_probe_search, agent_probe_execute, agent_probe_chat,
     ensure_agents, ensure_probe_agents, _build_agents, _build_probe_agents,
     _search_tool_limit, _probe_search_tool_limit,
     _execute_tool_limit, _probe_execute_tool_limit,
 )
 from app.model import is_configured
 from langchain.agents.middleware import ToolCallLimitMiddleware
+
+# 注意：agent_search 等是模块级变量，ensure_agents()/_build_agents() 会重新绑定它们。
+# `from app.agents import agent_search` 拿到的是导入瞬间的快照（通常是 None），
+# 因此这里统一用 agents_mod.agent_search 读取实时值。
 
 pass_count = 0
 fail_count = 0
@@ -95,14 +98,14 @@ result = ensure_probe_agents()
 check('ensure_probe_agents 返回布尔值', isinstance(result, bool))
 if is_configured():
     check('已配置时返回 True', result is True)
-    check('agent_probe_search 不为 None', agent_probe_search is not None)
-    check('agent_probe_execute 不为 None', agent_probe_execute is not None)
-    check('agent_probe_chat 不为 None', agent_probe_chat is not None)
+    check('agent_probe_search 不为 None', agents_mod.agent_probe_search is not None)
+    check('agent_probe_execute 不为 None', agents_mod.agent_probe_execute is not None)
+    check('agent_probe_chat 不为 None', agents_mod.agent_probe_chat is not None)
 else:
     check('未配置时返回 False', result is False)
-    check('agent_probe_search 为 None', agent_probe_search is None)
-    check('agent_probe_execute 为 None', agent_probe_execute is None)
-    check('agent_probe_chat 为 None', agent_probe_chat is None)
+    check('agent_probe_search 为 None', agents_mod.agent_probe_search is None)
+    check('agent_probe_execute 为 None', agents_mod.agent_probe_execute is None)
+    check('agent_probe_chat 为 None', agents_mod.agent_probe_chat is None)
 
 
 # ── _build_probe_agents ──
@@ -110,31 +113,24 @@ print('\n--- _build_probe_agents ---')
 probe_agents = _build_probe_agents()
 if probe_agents[0] is not None:
     check('返回三个 agent', len(probe_agents) == 3)
-    s, e, c = probe_agents
-    check('agent_probe_search 有 get_probe_command 工具', any(
-        getattr(t, 'name', '') == 'get_probe_command'
-        for t in getattr(s, 'tools', []) or []
-    ))
-    check('agent_probe_execute 有 execute_probe_command 工具', any(
-        getattr(t, 'name', '') == 'execute_probe_command'
-        for t in getattr(e, 'tools', []) or []
-    ))
-    check('agent_probe_chat 没有工具', len(getattr(c, 'tools', []) or []) == 0)
 else:
     check('未配置 LLM，跳过 ffprobe agent 结构测试', True)
 
+# 工具装配的权威来源是 AgentSpec（create_agent 返回的是 CompiledStateGraph，
+# 并不暴露 .tools，此前对这些属性的断言只会在"未配置"分支下空过）。
+print('\n--- 工具装配（来自 AgentSpec） ---')
+from app.agents import FFMPEG_SPEC, PROBE_SPEC
+from app.tools import get_command, get_files, execute_command, get_probe_command, execute_probe_command
 
-# ── ffprobe agent 工具列表（如果已创建） ──
-if agent_probe_search is not None:
-    print('\n--- ffprobe agent 工具列表 ---')
-    s_tools = [getattr(t, 'name', str(t)) for t in (getattr(agent_probe_search, 'tools', []) or [])]
-    e_tools = [getattr(t, 'name', str(t)) for t in (getattr(agent_probe_execute, 'tools', []) or [])]
-    c_tools = [getattr(t, 'name', str(t)) for t in (getattr(agent_probe_chat, 'tools', []) or [])]
-
-    check('agent_probe_search 有 get_probe_command', 'get_probe_command' in s_tools)
-    check('agent_probe_execute 有 get_files', 'get_files' in e_tools)
-    check('agent_probe_execute 有 execute_probe_command', 'execute_probe_command' in e_tools)
-    check('agent_probe_chat 没有工具', len(c_tools) == 0)
+check('ffmpeg search 绑定 get_command', FFMPEG_SPEC.search_tool is get_command)
+check('ffmpeg execute 绑定 execute_command', FFMPEG_SPEC.execute_tool is execute_command)
+check('ffprobe search 绑定 get_probe_command', PROBE_SPEC.search_tool is get_probe_command)
+check('ffprobe execute 绑定 execute_probe_command', PROBE_SPEC.execute_tool is execute_probe_command)
+check('两套 spec 的提示词互相独立',
+      FFMPEG_SPEC.search_prompt != PROBE_SPEC.search_prompt
+      and FFMPEG_SPEC.execute_prompt != PROBE_SPEC.execute_prompt
+      and FFMPEG_SPEC.chat_prompt != PROBE_SPEC.chat_prompt)
+check('get_files 可用（执行 agent 共享）', get_files.name == 'get_files')
 
 
 # ── ensure_agents ──
@@ -143,46 +139,28 @@ result = ensure_agents()
 check('ensure_agents 返回布尔值', isinstance(result, bool))
 if is_configured():
     check('已配置时返回 True', result is True)
-    check('agent_search 不为 None', agent_search is not None)
-    check('agent_execute 不为 None', agent_execute is not None)
-    check('agent_chat 不为 None', agent_chat is not None)
+    check('agent_search 不为 None', agents_mod.agent_search is not None)
+    check('agent_execute 不为 None', agents_mod.agent_execute is not None)
+    check('agent_chat 不为 None', agents_mod.agent_chat is not None)
 else:
     check('未配置时返回 False', result is False)
-    check('agent_search 为 None', agent_search is None)
-    check('agent_execute 为 None', agent_execute is None)
-    check('agent_chat 为 None', agent_chat is None)
+    check('agent_search 为 None', agents_mod.agent_search is None)
+    check('agent_execute 为 None', agents_mod.agent_execute is None)
+    check('agent_chat 为 None', agents_mod.agent_chat is None)
 
 
 # ── _build_agents ──
 print('\n--- _build_agents ---')
 agents = _build_agents()
 if agents[0] is not None:
-    s, e, c = agents
     check('返回三个 agent', len(agents) == 3)
-    check('agent_search 有 get_command 工具', any(
-        getattr(t, 'name', '') == 'get_command' or getattr(t, 'name', '') == 'get_command'
-        for t in getattr(s, 'tools', []) or []
-    ))
-    check('agent_execute 有 execute_command 工具', True)  # 工具列表检查
-    check('agent_chat 没有工具', True)
 else:
     check('未配置 LLM，跳过 agent 结构测试', True)
 
 
 # ── 工具列表（如果 agent 已创建） ──
-if agent_search is not None:
-    print('\n--- agent 工具列表 ---')
-    search_tools = getattr(agent_search, 'tools', []) or []
-    execute_tools = getattr(agent_execute, 'tools', []) or []
-    chat_tools = getattr(agent_chat, 'tools', []) or []
-
-    tool_names_s = [getattr(t, 'name', str(t)) for t in search_tools]
-    tool_names_e = [getattr(t, 'name', str(t)) for t in execute_tools]
-
-    check('agent_search 有 get_command', 'get_command' in tool_names_s)
-    check('agent_execute 有 get_files', 'get_files' in tool_names_e)
-    check('agent_execute 有 execute_command', 'execute_command' in tool_names_e)
-    check('agent_chat 没有工具', len(chat_tools) == 0)
+# 已由上面的「工具装配（来自 AgentSpec）」覆盖：create_agent 返回 CompiledStateGraph，
+# 不暴露 .tools，因此这里不再重复做无效的属性检查。
 
 
 print(f'\n结果: {pass_count} 通过, {fail_count} 失败')

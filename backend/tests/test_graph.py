@@ -48,24 +48,30 @@ check('state 类继承 MessagesState（含 messages 字段）', True)
 
 
 # ── which_continue_exec ──
+# 注意：未选择文件时路由直接 END（纯知识问答，见提交 3ff7ae7），
+# 因此要走到 execute 分支必须带上 files。
+FILES = ['backend/upload/a.mp4']
 print('\n--- which_continue_exec ---')
-s_true = state(flag=True)
-s_false = state(flag=False)
+s_true = state(flag=True, files=FILES)
+s_false = state(flag=False, files=FILES)
 
 r = which_continue_exec(s_true)
 check('flag=True 时返回 END', r == '__end__' or r == 'END')
 
 r = which_continue_exec(s_false)
-check('flag=False 时返回 execute', r == 'execute')
+check('flag=False 且有文件时返回 execute', r == 'execute')
+
+s_nofile = state(flag=False, files=[])
+check('未选择文件时返回 END', which_continue_exec(s_nofile) in ('__end__', 'END'))
 
 
 # ── which_continue_exec: 执行次数上限 ──
 print('\n--- which_continue_exec (执行次数上限) ---')
-s_exec_lim = state(flag=False, execute_count=3)
+s_exec_lim = state(flag=False, execute_count=3, files=FILES)
 r_lim = which_continue_exec(s_exec_lim)
 check('execute_count>=3 时返回 END', r_lim == '__end__' or r_lim == 'END')
 
-s_exec_ok = state(flag=False, execute_count=2)
+s_exec_ok = state(flag=False, execute_count=2, files=FILES)
 r_ok = which_continue_exec(s_exec_ok)
 check('execute_count<3 时返回 execute', r_ok == 'execute')
 
@@ -101,26 +107,19 @@ check('无 history 时仍正常工作', prompt3 != '')
 # ── search_count 限制（测试 early-return 路径） ──
 print('\n--- search_count 限制 ---')
 from app.model import is_configured as llm_configured
-if not llm_configured():
-    # 模拟：注入一个已超限的状态，验证 search_count >= 10 的 early-return
-    # search() 先调 ensure_agents() 再检查 search_count，所以没有 LLM 时会抛异常
-    # 这是当前实现的一个小问题：search_count 检查应在 LLM 检查之前
-    # 但功能上它只是一个性能优化（避免多余 LLM 调用），不影响正确性
-    s_limit = state(messages=[HumanMessage(content='test')], search_count=10)
-    try:
-        from app.graph import search
-        search(s_limit)
-        check('LLM 未配置但 search 未抛异常（说明走了 early-return 路径）', True)
-    except RuntimeError:
-        check('LLM 未配置，ensure_agents 优先拦截（预期行为）', True)
-else:
-    s_limit = state(messages=[HumanMessage(content='test')], search_count=10)
-    from app.graph import search
+
+# 上限检查位于 LLM 配置检查之前，因此无论 LLM 是否配置都应走 early-return 且不抛异常
+s_limit = state(messages=[HumanMessage(content='test')], search_count=10)
+from app.graph import search
+try:
     result = search(s_limit)
+    check('search_count 超限时未抛异常（先于 LLM 检查返回）', True)
     result_val = result.get('result', '')
-    if isinstance(result_val, list):
-        result_val = ' '.join(str(x) for x in result_val)
-    check('search_count >= 10 时跳过查询', '已达到最大查询次数' in result_val or '已达上限' in result_val or '跳过' in result_val)
+    check('result 是字符串（类型已统一）', isinstance(result_val, str),
+          f'实际类型：{type(result_val).__name__}')
+    check('返回最大查询次数提示', '已达到最大查询次数' in result_val)
+except RuntimeError as e:
+    check('search_count 超限时不应先抛 LLM 未配置异常', False, str(e))
 
 
 # ── build_probe_chat_prompt ──
@@ -148,40 +147,48 @@ check('无命令时不含命令字段', '执行的命令' not in prompt_p2)
 
 # ── ffprobe 图结构 ──
 print('\n--- ffprobe 图结构 ---')
-check('probe_exec_workflow 是 StateGraph', 'StateGraph' in type(probe_exec_workflow).__name__)
-p_nodes = list(probe_exec_workflow.nodes.keys())
+check('probe_exec_workflow 是已编译图',
+      'CompiledStateGraph' in type(probe_exec_workflow).__name__
+      or 'StateGraph' in type(probe_exec_workflow).__name__,
+      type(probe_exec_workflow).__name__)
+p_nodes = list(probe_exec_workflow.get_graph().nodes)
 check('包含 search 节点', 'search' in p_nodes)
 check('包含 execute 节点', 'execute' in p_nodes)
 
 print('\n--- ffprobe 图编译 ---')
 try:
-    compiled_p = probe_exec_workflow.compile()
+    compiled_p = probe_exec_workflow
     check('probe 图编译成功', True)
     check('probe 图编译结果是 Runnable', hasattr(compiled_p, 'invoke'))
 except Exception as e:
     check(f'probe 图编译失败: {e}', False, str(e))
 
 print('\n--- ffprobe search_count 限制 ---')
-if not llm_configured():
-    s_limit_p = state(messages=[HumanMessage(content='test')], search_count=10)
-    try:
-        probe_search(s_limit_p)
-        check('LLM 未配置但 probe_search 未抛异常', True)
-    except RuntimeError:
-        check('LLM 未配置，ensure_probe_agents 优先拦截（预期行为）', True)
-else:
-    s_limit_p = state(messages=[HumanMessage(content='test')], search_count=10)
+s_limit_p = state(messages=[HumanMessage(content='test')], search_count=10)
+try:
     result_p = probe_search(s_limit_p)
-    result_val = result_p.get('result', '')
-    if isinstance(result_val, list):
-        result_val = ' '.join(str(x) for x in result_val)
-    check('probe search_count >= 10 时跳过查询', '已达到最大查询次数' in result_val or '已达上限' in result_val or '跳过' in result_val)
+    check('probe_search 超限时未抛异常', True)
+    result_val_p = result_p.get('result', '')
+    check('probe result 是字符串（类型已统一）', isinstance(result_val_p, str),
+          f'实际类型：{type(result_val_p).__name__}')
+    check('返回最大查询次数提示', '已达到最大查询次数' in result_val_p)
+except RuntimeError as e:
+    check('probe_search 超限时不应先抛 LLM 未配置异常', False, str(e))
 
 
 # ── 图结构 ──
 print('\n--- 图结构 ---')
-check('exec_workflow 是 StateGraph', 'StateGraph' in type(exec_workflow).__name__)
-nodes = list(exec_workflow.nodes.keys())
+from app.graph import FFMPEG_GRAPH, PROBE_GRAPH
+check('ffmpeg 图记录输出文件', FFMPEG_GRAPH.capture_output is True)
+check('ffprobe 图不记录输出文件', PROBE_GRAPH.capture_output is False)
+check('ffmpeg 与 ffprobe graph spec 不同',
+      FFMPEG_GRAPH.agent_prefix != PROBE_GRAPH.agent_prefix
+      and FFMPEG_GRAPH.ensure_attr != PROBE_GRAPH.ensure_attr)
+check('exec_workflow 是已编译图',
+      'CompiledStateGraph' in type(exec_workflow).__name__
+      or 'StateGraph' in type(exec_workflow).__name__,
+      type(exec_workflow).__name__)
+nodes = list(exec_workflow.get_graph().nodes)
 check('包含 search 节点', 'search' in nodes)
 check('包含 execute 节点', 'execute' in nodes)
 
@@ -189,7 +196,7 @@ check('包含 execute 节点', 'execute' in nodes)
 # ── 图编译 ──
 print('\n--- 图编译 ---')
 try:
-    compiled = exec_workflow.compile()
+    compiled = exec_workflow
     check('图编译成功', True)
     check('编译结果是 Runnable', hasattr(compiled, 'invoke'))
 except Exception as e:
