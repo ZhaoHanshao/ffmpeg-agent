@@ -1,3 +1,12 @@
+# ── 运行时依赖（Docker / 用户环境只需装这些）──
+#
+# 注意：不要在这里加入 torch / transformers / sentence-transformers。
+# 嵌入走 app/onnx_embed.py（onnxruntime + tokenizers），运行时完全不需要它们；
+# 而 langchain_core/language_models/base.py 里 `from transformers import GPT2TokenizerFast`
+# 位于 try/except 内，装了就一定会被拉进来，实测让 `import langchain.agents`
+# 从 1.5s 涨到 11s（冷启动 66s），并顺带加载 torch。
+# 导出 ONNX 模型的构建期工具链见 requirements-build.txt。
+
 langchain
 langgraph
 langchain_openai
@@ -5,13 +14,14 @@ python-dotenv
 langchain_chroma
 langchain_text_splitters
 chromadb
-sentence-transformers
-# transformers 5.x 在 import 时调用 importlib.metadata.packages_distributions()，
-# 大量已装包环境下耗时数秒~数十秒，导致后端启动长时间无输出；4.x 仅用 find_spec，无此问题
-transformers>=4.41,<5
 fastapi
 uvicorn
 python-multipart
 beautifulsoup4
 lxml
 requests
+
+# 嵌入与向量运算（app/onnx_embed.py 直接 import，此前仅靠 chromadb 间接带入）
+onnxruntime
+tokenizers
+numpy

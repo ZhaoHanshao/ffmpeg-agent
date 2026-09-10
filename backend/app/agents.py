@@ -1,26 +1,32 @@
+"""六个 LangChain agent（ffmpeg / ffprobe 各三个）。
+
+结构说明：
+- 两套变体（ffmpeg / ffprobe）的差异只有「提示词、检索工具、执行工具、执行工具名」，
+  因此用 AgentSpec + _create 参数化构建，避免三份复制粘贴。
+- 为兼容既有测试与调用方，保留了全部原有的模块级名称
+  （`_search_prompt`、`agent_search`、`_build_agents`、`_search_tool_limit` 等），
+  它们现在只是参数化结果或别名，语义与之前一致。
+"""
 from app.model import get_model, is_configured
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolCallLimitMiddleware
 from app.tools import get_command, get_files, execute_command, get_probe_command, execute_probe_command
 from langchain.messages import SystemMessage
 
-_search_tool_limit = ToolCallLimitMiddleware(
-    tool_name="get_command",
-    run_limit=5,
-    thread_limit=5,
-)
+# 检索工具单次任务内的调用次数上限 / 执行工具只允许一次
+SEARCH_TOOL_LIMIT = 5
+EXECUTE_TOOL_LIMIT = 1
 
-_execute_tool_limit = ToolCallLimitMiddleware(
-    tool_name="execute_command",
-    run_limit=1,
-    thread_limit=1,
-)
+
+# ── 提示词 ──
 
 _search_prompt = (
     '你是一个 FFmpeg 知识库查询助手。'
     '你的任务是根据用户的 FFmpeg 相关问题，使用 get_command 工具查询知识库，知识库为英文知识库，用英文进行查询，'
     '获取相关的 FFmpeg 命令和文档片段，然后将查询结果整理后返回。'
     '只需要返回查询到的 FFmpeg 命令和参数解释，不要添加额外说明。'
+    '必须原样保留检索结果中出现的命令与参数拼写，不要凭记忆补全或改写选项名；'
+    '若检索结果里没有能直接回答问题的内容，就明确说明未检索到，不要编造命令。'
 )
 
 _execute_prompt = (
@@ -54,49 +60,13 @@ _chat_prompt = (
     '7. 使用中文、语气友好'
 )
 
-
-def _build_agents():
-    m = get_model()
-    if m is None:
-        return None, None, None
-    return (
-        create_agent(model=m, system_prompt=SystemMessage(content=_search_prompt), tools=[get_command], middleware=[_search_tool_limit]),
-        create_agent(model=m, system_prompt=SystemMessage(content=_execute_prompt), tools=[get_files, execute_command], middleware=[_execute_tool_limit]),
-        create_agent(model=m, system_prompt=SystemMessage(content=_chat_prompt), tools=[]),
-    )
-
-
-agent_search, agent_execute, agent_chat = None, None, None
-
-
-def ensure_agents():
-    global agent_search, agent_execute, agent_chat
-    if not is_configured():
-        return False
-    if agent_search is None:
-        agent_search, agent_execute, agent_chat = _build_agents()
-    return agent_search is not None
-
-
-# ── ffprobe agents ──
-
-_probe_search_tool_limit = ToolCallLimitMiddleware(
-    tool_name="get_probe_command",
-    run_limit=5,
-    thread_limit=5,
-)
-
-_probe_execute_tool_limit = ToolCallLimitMiddleware(
-    tool_name="execute_probe_command",
-    run_limit=1,
-    thread_limit=1,
-)
-
 _probe_search_prompt = (
     '你是一个 FFprobe 知识库查询助手。'
     '你的任务是根据用户的 FFprobe 相关问题，使用 get_probe_command 工具查询知识库，知识库为英文知识库，用英文进行查询，'
     '获取相关的 FFprobe 命令和文档片段，然后将查询结果整理后返回。'
     '只需要返回查询到的 FFprobe 命令和参数解释，不要添加额外说明。'
+    '必须原样保留检索结果中出现的命令与参数拼写，不要凭记忆补全或改写选项名；'
+    '若检索结果里没有能直接回答问题的内容，就明确说明未检索到，不要编造命令。'
 )
 
 _probe_execute_prompt = (
@@ -130,18 +100,125 @@ _probe_chat_prompt = (
 )
 
 
-def _build_probe_agents():
+# ── 工具调用上限中间件 ──
+
+_search_tool_limit = ToolCallLimitMiddleware(
+    tool_name="get_command",
+    run_limit=SEARCH_TOOL_LIMIT,
+    thread_limit=SEARCH_TOOL_LIMIT,
+)
+
+_execute_tool_limit = ToolCallLimitMiddleware(
+    tool_name="execute_command",
+    run_limit=EXECUTE_TOOL_LIMIT,
+    thread_limit=EXECUTE_TOOL_LIMIT,
+)
+
+_probe_search_tool_limit = ToolCallLimitMiddleware(
+    tool_name="get_probe_command",
+    run_limit=SEARCH_TOOL_LIMIT,
+    thread_limit=SEARCH_TOOL_LIMIT,
+)
+
+_probe_execute_tool_limit = ToolCallLimitMiddleware(
+    tool_name="execute_probe_command",
+    run_limit=EXECUTE_TOOL_LIMIT,
+    thread_limit=EXECUTE_TOOL_LIMIT,
+)
+
+
+class AgentSpec:
+    """一套（检索/执行/回答）agent 的声明式定义。
+
+    两套变体的唯一差异都在这里，graph.py 也复用同一份声明，
+    避免"改一处忘一处"造成 ffmpeg 与 ffprobe 行为漂移。
+    """
+
+    def __init__(self, name, search_prompt, execute_prompt, chat_prompt,
+                 search_tool, execute_tool, search_limit, execute_limit,
+                 ensure_fn=None):
+        self.name = name
+        self.search_prompt = search_prompt
+        self.execute_prompt = execute_prompt
+        self.chat_prompt = chat_prompt
+        self.search_tool = search_tool
+        self.execute_tool = execute_tool
+        self.search_limit = search_limit
+        self.execute_limit = execute_limit
+        self._ensure_fn = ensure_fn
+
+    @property
+    def ensure(self):
+        """惰性绑定的 ensure 函数（在模块末尾完成绑定，避免前向引用）。"""
+        return self._ensure_fn
+
+    def agents(self):
+        """返回 (search_agent, execute_agent, chat_agent)；LLM 未配置时返回 (None, None, None)。"""
+        return _create(self)
+
+
+FFMPEG_SPEC = AgentSpec(
+    name='ffmpeg',
+    search_prompt=_search_prompt,
+    execute_prompt=_execute_prompt,
+    chat_prompt=_chat_prompt,
+    search_tool=get_command,
+    execute_tool=execute_command,
+    search_limit=_search_tool_limit,
+    execute_limit=_execute_tool_limit,
+)
+
+PROBE_SPEC = AgentSpec(
+    name='ffprobe',
+    search_prompt=_probe_search_prompt,
+    execute_prompt=_probe_execute_prompt,
+    chat_prompt=_probe_chat_prompt,
+    search_tool=get_probe_command,
+    execute_tool=execute_probe_command,
+    search_limit=_probe_search_tool_limit,
+    execute_limit=_probe_execute_tool_limit,
+)
+
+
+def _create(spec: AgentSpec):
+    """按 spec 构建三个 agent。"""
     m = get_model()
     if m is None:
         return None, None, None
     return (
-        create_agent(model=m, system_prompt=SystemMessage(content=_probe_search_prompt), tools=[get_probe_command], middleware=[_probe_search_tool_limit]),
-        create_agent(model=m, system_prompt=SystemMessage(content=_probe_execute_prompt), tools=[get_files, execute_probe_command], middleware=[_probe_execute_tool_limit]),
-        create_agent(model=m, system_prompt=SystemMessage(content=_probe_chat_prompt), tools=[]),
+        create_agent(
+            model=m,
+            system_prompt=SystemMessage(content=spec.search_prompt),
+            tools=[spec.search_tool],
+            middleware=[spec.search_limit],
+        ),
+        create_agent(
+            model=m,
+            system_prompt=SystemMessage(content=spec.execute_prompt),
+            tools=[get_files, spec.execute_tool],
+            middleware=[spec.execute_limit],
+        ),
+        create_agent(
+            model=m,
+            system_prompt=SystemMessage(content=spec.chat_prompt),
+            tools=[],
+        ),
     )
 
 
+# ── 模块级 agent 句柄（None 表示 LLM 未配置；rebuild_agents 会重新赋值）──
+
+agent_search, agent_execute, agent_chat = None, None, None
 agent_probe_search, agent_probe_execute, agent_probe_chat = None, None, None
+
+
+def ensure_agents():
+    global agent_search, agent_execute, agent_chat
+    if not is_configured():
+        return False
+    if agent_search is None:
+        agent_search, agent_execute, agent_chat = _create(FFMPEG_SPEC)
+    return agent_search is not None
 
 
 def ensure_probe_agents():
@@ -149,5 +226,20 @@ def ensure_probe_agents():
     if not is_configured():
         return False
     if agent_probe_search is None:
-        agent_probe_search, agent_probe_execute, agent_probe_chat = _build_probe_agents()
+        agent_probe_search, agent_probe_execute, agent_probe_chat = _create(PROBE_SPEC)
     return agent_probe_search is not None
+
+
+# 绑定 ensure 函数（供 graph.py 通过 spec 取用，无需再硬编码 ensure_agents/ensure_probe_agents）
+FFMPEG_SPEC._ensure_fn = ensure_agents
+PROBE_SPEC._ensure_fn = ensure_probe_agents
+
+
+# ── 兼容既有调用方的别名 ──
+
+def _build_agents():
+    return _create(FFMPEG_SPEC)
+
+
+def _build_probe_agents():
+    return _create(PROBE_SPEC)

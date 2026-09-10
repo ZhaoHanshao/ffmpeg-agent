@@ -1,0 +1,15 @@
+# ── 构建期依赖（仅用于重新生成 ONNX 嵌入模型，运行时不需要）──
+#
+# 用途：运行 backend/build_bge_onnx.py，把 HuggingFace 的 PyTorch 权重
+#       （backend/data/bge_small）导出并量化为 backend/data/bge_onnx/model.onnx。
+# 产物已随仓库/发布包分发，因此普通安装与 Docker 构建都不需要本文件。
+#
+# 用法：
+#   pip install -r requirements-build.txt
+#   python backend/build_bge_onnx.py
+#
+# 导出脚本按 opset 18 导出，需要较新的 torch。
+torch
+transformers>=4.41,<5
+sentence-transformers
+onnx
