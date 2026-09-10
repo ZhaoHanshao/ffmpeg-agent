@@ -2,6 +2,7 @@ from langchain.tools import tool
 from langchain_core.runnables import RunnableConfig
 from app.db_search import get_text, get_probe_text
 from dotenv import load_dotenv
+import contextlib
 import os, sys, subprocess, shlex, logging, time, tempfile, threading
 
 load_dotenv()
@@ -11,9 +12,53 @@ logger = logging.getLogger(__name__)
 DOWNLOAD = os.getenv('DOWNLOAD', 'backend/download')
 UPLOAD = os.getenv('UPLOAD', 'backend/upload')
 
-# 串行化"执行 ffmpeg 命令"整段临界区：并发 ffmpeg 写同一输出文件会互相踩踏。
-# 历史上这里注释写的是"清空下载目录"，但该行为已改为注入 -y 覆盖，注释同步更正。
-_execute_lock = threading.Lock()
+
+class KeyedLockPool:
+    """按 key 加锁的锁池（固定条带，天然有界，无需清理）。
+
+    用于把"整个 ffmpeg 进程"的串行改成**只对同一输出文件**串行：
+    并发写不同输出文件互不阻塞（原先的全局锁会让一个长转码挡住所有人的请求），
+    而写同一输出文件仍然互斥，避免互相覆盖产生损坏文件。
+
+    实现要点：
+    - 固定条带数：hash 取模落到有限的锁上，map 不会随处理过的路径无限增长；
+      不同路径偶发映射到同一把锁只是轻微多等一会儿，不影响正确性。
+    - 一次要拿多把锁（多输出命令）时先按 key 排序，保证全局一致的加锁顺序，
+      避免两个请求各持一把、互相等待造成死锁。
+    """
+
+    def __init__(self, size=64):
+        self._locks = [threading.Lock() for _ in range(max(1, size))]
+
+    def _lock_for(self, key: str):
+        return self._locks[hash(key) % len(self._locks)]
+
+    @contextlib.contextmanager
+    def acquire(self, keys):
+        uniq = sorted({k for k in (keys or []) if k})
+        acquired = []
+        try:
+            for k in uniq:
+                lk = self._lock_for(k)
+                lk.acquire()
+                acquired.append(lk)
+            yield
+        finally:
+            for lk in reversed(acquired):
+                lk.release()
+
+
+# 保护"写同一个输出文件"这一临界区（不再全局串行）
+_output_locks = KeyedLockPool()
+
+# 同时在跑的 ffmpeg 进程数上限。分片加锁后并发能力变强，但本机 CPU 是有限的，
+# 且 langgraph 的节点各自占一个 asyncio.to_thread 线程——无上限会让多个转码
+# 互相抢 CPU 并耗尽默认线程池。设为 1 即退回"完全串行"。
+try:
+    MAX_CONCURRENT_FFMPEG = max(1, int(os.getenv('FFMPEG_MAX_CONCURRENCY', '4')))
+except ValueError:
+    MAX_CONCURRENT_FFMPEG = 4
+_ffmpeg_slots = threading.Semaphore(MAX_CONCURRENT_FFMPEG)
 
 # 单条命令最长执行时间(秒),超时强制终止,防止失控命令占死线程
 try:
@@ -129,6 +174,43 @@ def _is_inside_download(value: str) -> bool:
     base = os.path.realpath(DOWNLOAD)
     real = _resolve_under_cwd(v)
     return real == base or real.startswith(base + os.sep)
+
+
+def _output_lock_keys(parts: list) -> list:
+    """从命令参数里取出"输出文件"的规范化路径，作为加锁 key。
+
+    - 用 realpath 归一化，`download/a.mp4` 与 `backend/download/a.mp4` 落到同一把锁
+    - stdout 输出（`-`）不产生文件，跳过
+    - 解析失败时退化为空列表（不阻断执行，仍受并发闸门约束）
+    """
+    keys = []
+    try:
+        for idx in find_output_indexes(parts):
+            val = parts[idx]
+            if not val or val == '-':
+                continue
+            keys.append(os.path.normcase(os.path.realpath(os.path.join(os.getcwd(), val))))
+    except Exception as e:  # noqa: BLE001 - 加锁失败不应阻断执行
+        logger.warning(f'解析输出路径以加锁失败(本次不加文件锁)：{e}')
+    return keys
+
+
+@contextlib.contextmanager
+def _ffmpeg_slot(stop_event=None):
+    """限制同时在跑的 ffmpeg 进程数，并在等待期间响应停止请求。
+
+    分片加锁后并发能力变强，但本机 CPU 有限，且每个 graph 节点都占一个
+    asyncio.to_thread 线程；无上限会让多个转码互相抢 CPU 并耗尽默认线程池。
+    """
+    if stop_event is not None and stop_event.is_set():
+        raise InterruptedError('ffmpeg 已被用户停止')
+    while not _ffmpeg_slots.acquire(timeout=0.5):
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError('ffmpeg 已被用户停止')
+    try:
+        yield
+    finally:
+        _ffmpeg_slots.release()
 
 
 def _validate_input(value: str) -> bool:
@@ -353,7 +435,10 @@ def execute_command(command: str, config: RunnableConfig):
     stop_event = conf.get('stop_event')
     proc_box = conf.get('proc')
 
-    with _execute_lock:
+    # 只对"本命令将要写入的输出文件"加锁，而不是全局串行：
+    # 写不同输出文件的请求可以真正并行，写同一输出文件的仍互斥（否则会互相覆盖）。
+    lock_keys = _output_lock_keys(split_command(command))
+    with _output_locks.acquire(lock_keys), _ffmpeg_slot(stop_event):
         try:
             run_parts = split_command(command)
             # 输入源安全校验：只允许 UPLOAD/DOWNLOAD 内的文件或 lavfi 虚拟源
