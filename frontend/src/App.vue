@@ -18,6 +18,25 @@ const initError = ref('')
 const initProgress = ref(0)
 const initStep = ref('')
 let healthTimer = null
+let healthDelay = 3000
+let healthTicks = 0
+
+// 轮询节奏：初始化中 3s 一次；超过 ~1 分钟仍未就绪就退避到 30s 一次，
+// 避免长时间建库/下载期间持续打后端。就绪或失败即停止（失败后不再有意义）。
+const HEALTH_FAST_MS = 3000
+const HEALTH_SLOW_MS = 30000
+const HEALTH_SLOW_AFTER = 20
+
+function stopHealthPolling() {
+  if (healthTimer) clearInterval(healthTimer)
+  healthTimer = null
+}
+
+function scheduleHealthPoll() {
+  if (!healthTimer) return
+  clearInterval(healthTimer)
+  healthTimer = setInterval(pollHealth, healthDelay)
+}
 
 function pollHealth() {
   api
@@ -27,9 +46,21 @@ function pollHealth() {
       initError.value = h.error || ''
       initProgress.value = h.progress || 0
       initStep.value = h.step || ''
+      // 就绪：结束轮询
       if (initStatus.value === 'ok') {
-        clearInterval(healthTimer)
-        healthTimer = null
+        stopHealthPolling()
+        return
+      }
+      // 初始化失败：继续轮询没有意义（/api/health 始终返回 200，不会触发 catch），
+      // 旧实现在这种情况下会每 3 秒请求一次、永不停止。
+      if (initStatus.value === 'error') {
+        stopHealthPolling()
+        return
+      }
+      healthTicks += 1
+      if (healthTicks > HEALTH_SLOW_AFTER) {
+        healthDelay = HEALTH_SLOW_MS
+        scheduleHealthPoll()
       }
     })
     .catch(() => {})
@@ -120,12 +151,12 @@ async function onSend() {
 onMounted(() => {
   if (window.matchMedia?.('(max-width: 768px)').matches) leftCollapsed.value = true
   pollHealth()
-  healthTimer = setInterval(pollHealth, 3000)
+  healthTimer = setInterval(pollHealth, healthDelay)
   loadSettings()
 })
 
 onUnmounted(() => {
-  if (healthTimer) clearInterval(healthTimer)
+  stopHealthPolling()
 })
 </script>
 
