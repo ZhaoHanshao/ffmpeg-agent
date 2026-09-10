@@ -54,8 +54,21 @@ print('\n--- get_model ---')
 model = get_model()
 if is_configured():
     check('已配置时 model 不为 None', model is not None)
+    # 回归：配置来自磁盘/环境（未经 /api/settings/llm 保存）时也必须已构建，
+    # 否则重启后 ensure_agents() 返回 False，前端一直提示"LLM 未配置"。
+    check('配置有效时启动即构建模型（无需先调 PUT 设置）', model is not None)
 else:
     check('未配置时 model 为 None', model is None)
+
+# ensure_agents 应与 get_model 一致（配置有效 ⇒ agents 可用）
+print('\n--- ensure_agents 与配置一致性 ---')
+from app.agents import ensure_agents, ensure_probe_agents
+if is_configured():
+    check('已配置时 ensure_agents() 为 True', ensure_agents() is True)
+    check('已配置时 ensure_probe_agents() 为 True', ensure_probe_agents() is True)
+else:
+    check('未配置时 ensure_agents() 为 False', ensure_agents() is False)
+    check('未配置时 ensure_probe_agents() 为 False', ensure_probe_agents() is False)
 
 
 # ── update_model_config 触发 rebuild ──

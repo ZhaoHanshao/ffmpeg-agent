@@ -21,9 +21,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 ARG HTTP_PROXY=""
 ARG HTTPS_PROXY=""
 
-# ── Optional CPU-only torch (default: CPU, pass "cuXXX" for GPU) ──
-ARG TORCH_INDEX_URL="https://download.pytorch.org/whl/cpu"
-
 # ── System dependencies (no proxy — apt can't reach debian mirrors through it) ──
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
@@ -31,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# ── Proxy (set after apt-get so it only affects pip + ChromaDB pre-build + runtime) ──
+# ── Proxy (set after apt-get so it only affects pip + runtime) ──
 #     ffmpeg.org can be reached directly from China, SSL fails through the proxy
 ENV HTTP_PROXY=$HTTP_PROXY \
     HTTPS_PROXY=$HTTPS_PROXY \
@@ -39,10 +36,12 @@ ENV HTTP_PROXY=$HTTP_PROXY \
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
 ENV PIP_INDEX_URL=$PIP_INDEX_URL \
-    PIP_TRUSTED_HOST=$PIP_TRUSTED_HOST \
-    PIP_EXTRA_INDEX_URL=$TORCH_INDEX_URL
+    PIP_TRUSTED_HOST=$PIP_TRUSTED_HOST
 
 # ── Python dependencies ──
+# requirements.txt 不含 torch/transformers/sentence-transformers：
+# 嵌入走 onnxruntime+tokenizers（见 app/onnx_embed.py），
+# 装了 transformers 反而会让 langchain_core 在导入期拉入 torch，启动慢 7 倍。
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -50,27 +49,21 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ backend/
 COPY --from=frontend-builder /build/dist/ frontend/dist/
 
-# ── Pre-build vector database (BGE model + ChromaDB) ──
-# NOTE: Skipped — ffmpeg.org SSL handshake fails during Docker build.
-#       Vector DB will be built on first runtime access.
-# RUN python <<EOF
-# import sys, os
-# sys.path.insert(0, 'backend')
-# os.environ['DB_DIR']='backend/data/chroma_db'
-# os.environ['COLLECTION_NAME']='ffmpeg_docs'
-# os.environ['BGE_MODEL_NAME']='BAAI/bge-small-zh-v1.5'
-# os.environ['BGE_CACHE_DIR']='backend/data/bge_small'
-# os.environ['DOC_URL']='https://ffmpeg.org/ffmpeg-all.html'
-# from app.db_search import _ensure_vector_db
-# _ensure_vector_db()
-# EOF
+# ── Pre-built knowledge base ──
+# backend/data/bge_onnx（嵌入模型）与 backend/data/chroma_db（向量库）由 .dockerignore 放行后随
+# COPY backend/ 一起进镜像，无需在构建期联网抓 ffmpeg.org。
+# 若需在构建期重建向量库，可运行:
+# RUN python backend/build_package_db.py
 
 # ── Runtime defaults (override via -e) ──
+# BGE_CACHE_DIR 必须指向含 model.onnx 的目录；旧值 backend/data/bge_small 是
+# PyTorch 权重目录，镜像里并不存在该目录，会导致嵌入模型解析失败。
 ENV DB_DIR=backend/data/chroma_db \
     COLLECTION_NAME=ffmpeg_docs \
-    BGE_MODEL_NAME=BAAI/bge-small-zh-v1.5 \
-    BGE_CACHE_DIR=backend/data/bge_small \
-    DOC_URL=https://ffmpeg.org/ffmpeg-all.html
+    PROBE_COLLECTION_NAME=ffprobe_docs \
+    BGE_CACHE_DIR=backend/data/bge_onnx \
+    DOC_URL=https://ffmpeg.org/ffmpeg-all.html \
+    PROBE_DOC_URL=https://ffmpeg.org/ffprobe-all.html
 
 # ── Non-root user (security hardening) ──
 RUN mkdir -p backend/upload backend/download backend/data \
@@ -82,8 +75,10 @@ USER app
 EXPOSE 8000
 
 # Startup is slow (~40-80s: imports + BGE model + first-run ChromaDB build),
-# hence the long start-period
+# hence the long start-period.
+# 注意：/api/health 固定返回 HTTP 200，初始化失败时把原因写在 body 的 status 里，
+# 所以这里必须解析 body，否则初始化失败也永远显示 healthy。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+    CMD ["python", "-c", "import json,urllib.request;d=json.load(urllib.request.urlopen('http://localhost:8000/api/health',timeout=3));raise SystemExit(0 if d.get('status')=='ok' else 1)"]
 
 CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

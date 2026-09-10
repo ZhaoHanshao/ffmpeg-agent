@@ -1,0 +1,49 @@
+# Python
+__pycache__
+*.pyc
+.venv
+.pytest_cache
+
+# Git
+.git
+.gitignore
+
+# Node
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# App runtime data
+#
+# 这里刻意逐项列举需要保留的目录，而不是用 `backend/data/*` 再配 `!` 放行：
+# `*` 与 `!` 的组合涉及"父目录被排除时子路径是否还能被否定规则救回"的细节，
+# 行为不易静态确认；直接写精确目录名则只依赖最简单的同名匹配，无歧义。
+#
+# 背景：此前整目录排除 backend/data，镜像里既没有 ONNX 嵌入模型也没有向量库，
+# resolve_model_dir() 全部候选失败 → _preload 抛 RuntimeError → /api/health 永远 error。
+#
+# 必须进镜像的（精确目录，勿删）：
+#   backend/data/bge_onnx     ONNX 嵌入模型，运行时必需（约 25MB）
+#   backend/data/chroma_db    打包期预构建的向量库，避免容器首跑联网抓 ffmpeg.org
+#   backend/data/docs         本地文档缓存，在线抓取失败时的兜底
+#
+# 运行时产物与仅构建期使用的权重目录（保持排除）：
+backend/upload
+backend/download
+backend/data/bge_small
+backend/data/llm_settings.json
+
+# Secrets
+.env
+
+# Docs / meta not needed in the image
+*.md
+docker-compose.yml
+
+# Editor / OS
+.idea
+.vscode
+*.log
+.DS_Store
+Thumbs.db

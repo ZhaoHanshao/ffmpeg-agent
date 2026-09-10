@@ -103,8 +103,28 @@ def is_configured():
         return bool(_model_config.get('model') and _model_config.get('base_url') and _model_config.get('api_key'))
 
 
-def get_model():
+def _build_model_locked():
+    """在持锁状态下按当前配置构建 ChatOpenAI(配置不完整时返回 None)。"""
+    global _model
+    _model = ChatOpenAI(**_model_config) if is_configured() else None
     return _model
+
+
+# 启动即按磁盘/环境配置构建模型实例。
+# 此前只有 update_model_config() 会赋值 _model，而启动路径 _load_settings_file()
+# 只恢复 _model_config，导致重启后 is_configured() 为 True 但 get_model() 为 None →
+# ensure_agents() 返回 False → 前端每次重启都提示"LLM 未配置"，必须重新点一次保存。
+with _config_lock:
+    _build_model_locked()
+
+
+def get_model():
+    """返回当前 ChatOpenAI 实例；若配置有效但尚未构建（例如刚被清空重建）则惰性构建。"""
+    global _model
+    with _config_lock:
+        if _model is None and is_configured():
+            _build_model_locked()
+        return _model
 
 
 def rebuild_agents():
@@ -123,7 +143,7 @@ def rebuild_agents():
 
 
 def update_model_config(new_config: dict):
-    global _model_config, _model
+    global _model_config
     with _config_lock:
         cfg = copy.deepcopy(_model_config)
         for k in ('model', 'base_url', 'temperature', 'max_tokens'):
@@ -136,10 +156,7 @@ def update_model_config(new_config: dict):
                 cfg['api_key'] = incoming
         cfg = _validate(cfg)
         _model_config = cfg
-        if is_configured():
-            _model = ChatOpenAI(**cfg)
-        else:
-            _model = None
+        _build_model_locked()
     # 锁外重建 agents(避免与 is_configured 死锁/长持锁)
     rebuild_agents()
     _save_settings_file(cfg)

@@ -23,17 +23,37 @@ def _l2_normalize(emb: np.ndarray) -> np.ndarray:
 
 
 def resolve_model_dir():
-    """按优先级找到含 model.onnx 的目录：env → 相对路径 → 冻结包内数据。"""
+    """按优先级找到含 model.onnx 的目录：env → 相对路径 → 冻结包内数据。
+
+    BGE_CACHE_DIR 若指向旧版 PyTorch 权重目录（如 backend/data/bge_small，
+    含 pytorch_model.bin 但没有 model.onnx），会被跳过并落到 ONNX 目录，
+    同时打印告警——旧配置只该导致提示，不该导致启动失败。
+    """
+    env_dir = os.getenv('BGE_CACHE_DIR')
     cands = []
-    env = os.getenv('BGE_CACHE_DIR')
-    if env:
-        cands.append(env)
+    if env_dir:
+        cands.append(env_dir)
     cands.append('backend/data/bge_onnx')
     if getattr(sys, 'frozen', False):
         cands.append(os.path.join(sys._MEIPASS, 'backend', 'data', 'bge_onnx'))
+
     for c in cands:
         if os.path.isfile(os.path.join(c, 'model.onnx')):
+            if env_dir and os.path.abspath(c) != os.path.abspath(env_dir):
+                logger.warning(
+                    f'BGE_CACHE_DIR={env_dir} 下没有 model.onnx（PyTorch 权重目录已不再支持），'
+                    f'改用 {c}'
+                )
             return c
+
+    if env_dir and any(
+        os.path.isfile(os.path.join(env_dir, f))
+        for f in ('pytorch_model.bin', 'model.safetensors')
+    ):
+        logger.warning(
+            f'BGE_CACHE_DIR={env_dir} 是 PyTorch 权重目录，需要先运行 backend/build_bge_onnx.py '
+            f'生成 ONNX 模型（model.onnx + tokenizer.json）'
+        )
     return cands[0]
 
 

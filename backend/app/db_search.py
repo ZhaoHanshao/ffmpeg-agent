@@ -20,6 +20,16 @@ try:
 except ValueError:
     DOC_REFRESH_DAYS = 0
 
+# 检索返回条数。实测（6 个典型问题，ffmpeg 库）：
+#   k=20 -> 平均 14,474 字符（约 9.6k token）；k=8 -> 6,261 字符（约 4.2k token，降低 57%）
+# 而真正相关的文档集中在第 1~2 条（如 "extract audio to mp3" 的首条距离 0.573，
+# 第 2 条即跳到 0.704 并密集扎堆），其余基本是填充噪声。
+# 把 20 条原样塞进提示词既浪费上下文，也容易让模型挑错命令，故收敛到 8 条。
+try:
+    RETRIEVAL_K = max(1, int(os.getenv('RETRIEVAL_K', '8') or 8))
+except ValueError:
+    RETRIEVAL_K = 8
+
 
 def _marker_path(collection_name: str) -> str:
     return os.path.join(DB_DIR, f'.built_{collection_name}.json') if DB_DIR else ''
@@ -70,6 +80,18 @@ class BGEEmbedding(Embeddings):
 
 
 def get_embeddings() -> Embeddings:
+    """返回进程内共享的嵌入器。
+
+    必须缓存：BGEOnnxEmbedding 会把 onnxruntime session 与 tokenizer 挂在实例上，
+    每次新建都会重新加载一遍模型（约 25MB ONNX + tokenizer），
+    而 _get_vector_db / _get_probe_vector_db / 构建流程都会调用本函数。
+    """
+    return _get_embeddings()
+
+
+@lru_cache(maxsize=1)
+def _get_embeddings() -> Embeddings:
+    logger.info('加载 ONNX 嵌入模型')
     return BGEEmbedding()
 
 
@@ -124,11 +146,15 @@ def _ensure_vector_db():
     logger.info('向量库构建完成')
 
 
-def get_text(question: str):
-    logger.info('向量检索')
+def _retrieve(vector_db, question: str, label: str = ''):
+    """共用的检索实现：按 RETRIEVAL_K 取回、按内容去重、返回 [{title, content}]。
+
+    失败时返回错误说明字符串（调用方 tools._format_docs 会原样透出）。
+    """
+    logger.info(f'{label}向量检索')
     logger.info(f'检索内容：{question[:200]}')
     try:
-        docs = _get_vector_db().similarity_search(query=question, k=20)
+        docs = vector_db.similarity_search(query=question, k=RETRIEVAL_K)
         out, seen = [], set()
         for doc in docs:
             if doc.page_content in seen:
@@ -138,6 +164,10 @@ def get_text(question: str):
         return out
     except Exception as e:
         return f'查询失败，原因:\n{e}'
+
+
+def get_text(question: str):
+    return _retrieve(_get_vector_db(), question)
 
 
 # ── ffprobe 知识库（ffprobe-all.html） ──
@@ -198,19 +228,7 @@ def _ensure_probe_vector_db():
 
 
 def get_probe_text(question: str):
-    logger.info('ffprobe 向量检索')
-    logger.info(f'检索内容：{question[:200]}')
-    try:
-        docs = _get_probe_vector_db().similarity_search(query=question, k=20)
-        out, seen = [], set()
-        for doc in docs:
-            if doc.page_content in seen:
-                continue
-            seen.add(doc.page_content)
-            out.append({'title': doc.metadata.get('title', ''), 'content': doc.page_content})
-        return out
-    except Exception as e:
-        return f'查询失败，原因:\n{e}'
+    return _retrieve(_get_probe_vector_db(), question, label='ffprobe ')
 
 
 if __name__ == '__main__':

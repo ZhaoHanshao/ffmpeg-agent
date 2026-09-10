@@ -8,7 +8,9 @@ AGENTS.md
 node_modules/
 backend/download/*
 backend/upload/*
-/.dockerignore
+# 注意：不要把 .dockerignore 排除掉——Docker 构建依赖它放行
+# backend/data/bge_onnx 与 backend/data/chroma_db，否则镜像里没有嵌入模型，
+# 启动时 /api/health 会永远停在 error（曾因它未入库而踩坑）。
 docker-deploy-guide.md
 api-contract.md
 api-contract.pdf
