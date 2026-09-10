@@ -83,6 +83,7 @@ const {
   savingSettings,
   configured,
   settings,
+  settingsError,
   loadSettings,
   saveSettings,
 } = useSettings()
@@ -225,6 +226,7 @@ onUnmounted(() => {
       v-model="settings"
       :configured="configured"
       :saving="savingSettings"
+      :error="settingsError"
       @save="saveSettings"
     />
 

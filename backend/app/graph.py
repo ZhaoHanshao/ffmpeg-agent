@@ -351,7 +351,8 @@ def get_chat_agent(kind: str = ''):
 if __name__ == '__main__':
     import sys
     if not FFMPEG_GRAPH.ensure():
-        print('错误：LLM 未配置，请先设置 MODEL_NAME、BASE_URL、API_KEY')
+        print('错误：LLM 未配置，请在页面右上角 ⚙️ 设置中填写模型信息'
+              '（配置保存在 backend/data/llm_settings.json）')
         sys.exit(1)
     if not PROBE_GRAPH.ensure():
         print('错误：ffprobe agent 创建失败')

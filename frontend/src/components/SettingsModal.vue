@@ -4,6 +4,7 @@ const show = defineModel('show', { type: Boolean, default: false })
 defineProps({
   configured: { type: Boolean, default: false },
   saving: { type: Boolean, default: false },
+  error: { type: String, default: '' },
 })
 const emit = defineEmits(['save'])
 </script>
@@ -22,16 +23,18 @@ const emit = defineEmits(['save'])
       </div>
       <div class="modal-body">
         <p v-if="!configured" class="settings-hint">请先填写 LLM 模型信息以开始使用</p>
+        <p v-if="error" class="settings-error">{{ error }}</p>
+        <p class="settings-note">配置保存在服务端 <code>backend/data/llm_settings.json</code>，不读取 .env。</p>
         <label class="settings-field">
-          <span>模型名称 (MODEL_NAME)</span>
-          <input v-model="settings.model" placeholder="如 gpt-4o-mini" />
+          <span>模型名称</span>
+          <input v-model="settings.model" placeholder="如 gpt-4o-mini / deepseek-chat" />
         </label>
         <label class="settings-field">
-          <span>接口地址 (BASE_URL)</span>
+          <span>接口地址 <span class="field-hint">OpenAI 兼容的 BASE_URL</span></span>
           <input v-model="settings.base_url" placeholder="如 https://api.openai.com/v1" />
         </label>
         <label class="settings-field">
-          <span>API Key (API_KEY)</span>
+          <span>API Key</span>
           <input v-model="settings.api_key" type="password" placeholder="sk-..." />
         </label>
         <label class="settings-field">
@@ -120,6 +123,17 @@ const emit = defineEmits(['save'])
   font-weight: 400;
   color: var(--dsh-text-4);
 }
+.settings-note {
+  font-size: var(--dsh-fs-sm);
+  color: var(--dsh-text-4);
+  line-height: 1.5;
+}
+.settings-note code {
+  background: var(--dsh-surface-3);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 11.5px;
+}
 .settings-field input {
   padding: 9px 12px;
   border: 1px solid var(--dsh-border-strong);
@@ -174,6 +188,17 @@ const emit = defineEmits(['save'])
   border: 1px solid var(--dsh-danger-line);
   border-radius: var(--dsh-r-sm);
   padding: 9px 12px;
+}
+/* 保存/校验失败的原因（如"API Key 无效或已过期"） */
+.settings-error {
+  font-size: var(--dsh-fs-base);
+  color: var(--dsh-danger-strong);
+  background: var(--dsh-danger-soft);
+  border: 1px solid var(--dsh-danger-line);
+  border-radius: var(--dsh-r-sm);
+  padding: 9px 12px;
+  line-height: 1.5;
+  word-break: break-word;
 }
 .modal-overlay.mandatory .modal {
   box-shadow: var(--dsh-shadow-lg), 0 0 0 2px var(--dsh-brand);

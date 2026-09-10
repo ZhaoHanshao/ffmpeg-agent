@@ -322,6 +322,30 @@ async def upload_files(files: list[UploadFile] = File(...)):
     return {"uploaded": saved}
 
 
+def _friendly_error(e: Exception) -> str:
+    """把 LLM 异常翻译成用户能照着做的提示。
+
+    原先统一包成"知识库查询或命令执行失败：<原始异常>"，把真正原因（密钥失效、
+    余额不足、模型名不存在）埋在一大段英文里，用户看到 401 也不知道该改什么。
+    """
+    status = getattr(e, 'status_code', None)
+    if status == 401:
+        return ('LLM 鉴权失败（401）：API Key 无效或已过期。'
+                '请点击右上角 ⚙️ 打开设置，重新填写 API Key 后保存。')
+    if status == 403:
+        return 'LLM 拒绝访问（403）：当前 API Key 无权使用该模型，请检查模型名称或账号权限。'
+    if status == 404:
+        return 'LLM 接口返回 404：接口地址或模型名称不正确，请在 ⚙️ 设置中核对。'
+    if status == 429:
+        return 'LLM 请求过于频繁或额度不足（429）：请稍后重试，或检查账号余额与限速。'
+    if isinstance(status, int) and status >= 500:
+        return f'LLM 服务端错误（{status}）：这是模型服务商侧的问题，请稍后重试。'
+    text = str(e)
+    if 'Connection' in type(e).__name__ or 'Timeout' in type(e).__name__ or 'timed out' in text.lower():
+        return f'无法连接 LLM 服务：请检查接口地址（BASE_URL）与网络。原始信息：{text[:200]}'
+    return f'知识库查询或命令执行失败：{text[:400]}'
+
+
 async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job=None):
     """公共 SSE 流：job → graph 进度 → meta → chat 逐 token → done"""
     stop_event = job['stop'] if job else None
@@ -348,7 +372,7 @@ async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job
             return
         except Exception as e:
             logger.error(f'图谱执行失败：{e}')
-            yield f"data: {json.dumps({'event': 'error', 'text': f'知识库查询或命令执行失败：{str(e)}'})}\n\n"
+            yield f"data: {json.dumps({'event': 'error', 'text': _friendly_error(e)})}\n\n"
             yield "data: {\"event\": \"done\"}\n\n"
             return
 
@@ -372,7 +396,9 @@ async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job
                         full_text += content
                         yield f"data: {json.dumps({'event': 'token', 'text': content})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'event': 'error', 'text': str(e)})}\n\n"
+            # 与图谱阶段一致：用可执行的提示替代原始异常
+            yield f"data: {json.dumps({'event': 'error', 'text': _friendly_error(e)})}\n\n"
+            yield "data: {\"event\": \"done\"}\n\n"
             return
 
         yield "data: {\"event\": \"done\"}\n\n"
@@ -631,7 +657,33 @@ async def update_llm_settings(body: dict):
         update_model_config(body)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return get_model_config()
+
+    # 保存后立刻做一次轻量连通性检查：配置写错（密钥失效/模型名不存在/地址不通）
+    # 在这里就能发现并回传原因，而不是等到用户提问时在对话里报错。
+    cfg = get_model_config()
+    if cfg.get('configured'):
+        check = await _check_llm_connection()
+        if not check['ok']:
+            # 配置已落盘（用户可能就是想先存着），但明确告知校验未通过
+            raise HTTPException(status_code=400, detail=check['message'])
+    return cfg
+
+
+async def _check_llm_connection() -> dict:
+    """用 1 个 token 试调一次，返回 {'ok': bool, 'message': str}。"""
+    try:
+        from app.model import get_model
+        from langchain.messages import HumanMessage
+
+        m = get_model()
+        if m is None:
+            return {'ok': False, 'message': '模型未构建（配置不完整）'}
+        await m.ainvoke([HumanMessage(content='ping')], config={'max_tokens': 1})
+        logger.info('LLM 连通性检查通过')
+        return {'ok': True, 'message': '配置有效，连接正常'}
+    except Exception as e:  # noqa: BLE001 - 任何异常都要转成可读提示
+        logger.warning(f'LLM 连通性检查失败：{e}')
+        return {'ok': False, 'message': _friendly_error(e)}
 
 
 @app.get("/api/health")

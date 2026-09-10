@@ -21,7 +21,21 @@ async function request(path, options = {}) {
     ...options,
     headers: { ...authHeaders(), ...(options.headers || {}) },
   })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) {
+    // 把服务端的 detail 带出来：否则调用方只能看到 "HTTP 400"，
+    // 丢掉 "API Key 无效" 这类真正有用的信息。
+    let detail = ''
+    try {
+      const body = await res.json()
+      detail = body?.detail || body?.message || ''
+    } catch {
+      // 响应不是 JSON（例如 HTML 错误页），忽略
+    }
+    const err = new Error(detail || `HTTP ${res.status}`)
+    err.status = res.status
+    err.detail = detail
+    throw err
+  }
   return res
 }
 

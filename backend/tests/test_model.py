@@ -9,7 +9,8 @@ load_dotenv()
 
 from app.model import (
     is_configured, get_model, get_model_config,
-    update_model_config, rebuild_agents, _model_config, _model
+    update_model_config, rebuild_agents, _model_config, _model,
+    LLM_CONFIG_FIELDS, SETTINGS_FILE,
 )
 
 pass_count = 0
@@ -47,6 +48,35 @@ check('max_tokens 为 1024', cfg.get('max_tokens') == 1024)
 print('\n--- is_configured ---')
 # 取决于实际环境变量，但接口应该正常工作
 check('is_configured 返回布尔值', isinstance(is_configured(), bool))
+
+
+# ── LLM 配置不再来自环境变量（唯一来源是设置文件） ──
+print('\n--- LLM 配置来源（应为设置文件，非 .env）---')
+# 这些字段由设置文件独占。曾经 .env 与设置文件各存一套且设置文件优先，
+# 导致"改了 .env 不生效"且报错时无从判断实际用的是哪一套。
+import inspect  # noqa: E402
+
+_src = inspect.getsource(__import__('app.model', fromlist=['x']))
+for _env in ('MODEL_NAME', 'BASE_URL', 'API_KEY', 'TEMPERATURE', 'MAX_TOKENS'):
+    check(f'源码中不再读取环境变量 {_env}',
+          f"getenv('{_env}'" not in _src and f'getenv("{_env}"' not in _src)
+
+# 实际注入一组环境变量，确认当前生效配置不受影响
+_env_before = dict(_model_config)
+os.environ['MODEL_NAME'] = 'env-injected-should-be-ignored'
+os.environ['BASE_URL'] = 'https://env-injected.invalid/v1'
+os.environ['API_KEY'] = 'env-injected-key'
+_cfg_after = get_model_config()
+check('注入 .env 风格变量后 model 未变',
+      _cfg_after.get('model') == _env_before.get('model'),
+      f"{_cfg_after.get('model')!r} vs {_env_before.get('model')!r}")
+check('注入 .env 风格变量后 base_url 未变',
+      _cfg_after.get('base_url') == _env_before.get('base_url'))
+for _v in ('MODEL_NAME', 'BASE_URL', 'API_KEY'):
+    os.environ.pop(_v, None)
+
+check('设置文件路径可配置', isinstance(SETTINGS_FILE, str) and SETTINGS_FILE.endswith('.json'),
+      SETTINGS_FILE)
 
 
 # ── get_model ──

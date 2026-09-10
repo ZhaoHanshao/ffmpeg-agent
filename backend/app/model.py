@@ -7,24 +7,26 @@ from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
-# 运行时配置持久化文件(相对项目根目录/冻结模式 exe 目录)
+# LLM 配置的唯一来源：这个 JSON 文件（由页面右上角 ⚙️ 设置弹窗写入）。
+# 刻意不再从环境变量（.env）读取 model / base_url / api_key：
+# 单一来源可以避免"改了 .env 却仍用旧配置"这类问题——此前 .env 与设置文件
+# 各存一套 LLM 配置，设置文件优先级更高，改了 .env 不生效，报错时也很难判断
+# 实际用的是哪一套。
 SETTINGS_FILE = os.getenv('SETTINGS_FILE', 'backend/data/llm_settings.json')
 
-_model_config = {
-    'model': os.getenv('MODEL_NAME'),
-    'base_url': os.getenv('BASE_URL'),
-    'api_key': os.getenv('API_KEY'),
+# 只有这些字段归设置文件管；SETTINGS_FILE 路径本身仍可用环境变量覆盖。
+LLM_CONFIG_FIELDS = ('model', 'base_url', 'api_key', 'temperature', 'max_tokens')
+
+_DEFAULT_CONFIG = {
+    'model': None,
+    'base_url': None,
+    'api_key': None,
     'temperature': 0.2,
     'max_tokens': 1024,
     'streaming': True,
 }
-for _env_name, _key, _cast in (('TEMPERATURE', 'temperature', float), ('MAX_TOKENS', 'max_tokens', int)):
-    _raw = os.getenv(_env_name)
-    if _raw:
-        try:
-            _model_config[_key] = _cast(_raw)
-        except ValueError:
-            logger.warning(f'忽略无效的环境变量 {_env_name}={_raw!r}')
+
+_model_config = dict(_DEFAULT_CONFIG)
 
 # RLock:get_model_config 持锁期间还会调用 is_configured,可重入避免死锁
 _config_lock = threading.RLock()
@@ -32,15 +34,17 @@ _model = None
 
 
 def _load_settings_file():
-    """启动时从磁盘恢复上次保存的配置(优先级高于环境变量默认值)。"""
+    """启动时从磁盘恢复上次保存的配置（LLM 配置的唯一来源）。"""
     try:
         if os.path.isfile(SETTINGS_FILE):
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            for k in ('model', 'base_url', 'api_key', 'temperature', 'max_tokens'):
+            for k in LLM_CONFIG_FIELDS:
                 if k in data and data[k] is not None:
                     _model_config[k] = data[k]
             logger.info(f'已从 {SETTINGS_FILE} 恢复 LLM 配置')
+        else:
+            logger.info(f'未找到 {SETTINGS_FILE}，LLM 未配置（可在页面右上角 ⚙️ 中填写）')
     except (OSError, ValueError) as e:
         logger.warning(f'读取配置文件 {SETTINGS_FILE} 失败,使用默认配置: {e}')
 
@@ -48,7 +52,7 @@ def _load_settings_file():
 def _save_settings_file(cfg: dict):
     try:
         os.makedirs(os.path.dirname(os.path.abspath(SETTINGS_FILE)), exist_ok=True)
-        payload = {k: cfg.get(k) for k in ('model', 'base_url', 'api_key', 'temperature', 'max_tokens')}
+        payload = {k: cfg.get(k) for k in LLM_CONFIG_FIELDS}
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
     except OSError as e:
@@ -146,7 +150,9 @@ def update_model_config(new_config: dict):
     global _model_config
     with _config_lock:
         cfg = copy.deepcopy(_model_config)
-        for k in ('model', 'base_url', 'temperature', 'max_tokens'):
+        for k in LLM_CONFIG_FIELDS:
+            if k == 'api_key':
+                continue  # 下面单独处理（脱敏占位符不能覆盖真实 key）
             if k in new_config and new_config[k] is not None:
                 cfg[k] = new_config[k]
         # api_key 特殊处理：空值或脱敏占位符(前端回显)时保留原 key,防止被掩码覆盖
