@@ -65,16 +65,6 @@ print('\n--- execute_command (路径重写) ---')
 for f in os.listdir(DOWNLOAD):
     os.remove(os.path.join(DOWNLOAD, f))
 
-# 用一个会被拒绝的命令测试路径重写逻辑（实际不执行）
-# 先测试路径是否会被重写到 DOWNLOAD
-res = execute_command.invoke({'command': 'ffmpeg -i input.mp4 output.mp4'})
-# 即使拒绝执行非 ffmpeg 命令，路径重写逻辑在检验之前就已执行
-# 这里测试拒绝后返回的 command 字段是否包含 DOWNLOAD 路径
-if '拒绝执行非 ffmpeg 命令' in res.get('command_result', ''):
-    # get_command 内部检查命令名，如果不是 ffmpeg 就拒绝
-    # 等等，ffmpeg 命令不会被拒绝
-    pass
-
 # 真正测试路径重写：用 ffmpeg 命令（但 ffmpeg 可能不存在）
 # 检查命令中的输出路径是否被改写
 res = execute_command.invoke({'command': 'ffmpeg -i /tmp/input.mp4 /tmp/output.mp4'})
@@ -84,25 +74,33 @@ if '拒绝执行非 ffmpeg 命令' not in res.get('command_result', ''):
     check('输出路径被重写到 DOWNLOAD', DOWNLOAD in cmd)
 
 
-# ── execute_command: download 目录清理 ──
-print('\n--- execute_command (download 目录清理) ---')
-# 在 download 中放一个文件
+# ── execute_command: 输出路径包含判断（路径语义，非子串匹配） ──
+print('\n--- execute_command (输出路径包含判断) ---')
+from app.tools import _is_inside_download
+
+check('裸文件名需要重写', _is_inside_download('output.mp4') is False)
+check('DOWNLOAD 下绝对/相对路径不再重写',
+      _is_inside_download(os.path.join(DOWNLOAD, 'out.mp4')) is True)
+check('子目录中的输出不再重写',
+      _is_inside_download(os.path.join(DOWNLOAD, 'sub', 'out.mp4')) is True)
+check('stdout 输出（-）不参与重写', _is_inside_download('-') is False)
+# 旧实现用子串匹配，`upload/download_x/out.mp4` 会被误判为"已在 DOWNLOAD 内"
+check('同名子串路径不被误判（旧子串匹配的缺陷）',
+      _is_inside_download(os.path.join('upload', 'download_x', 'out.mp4')) is False)
+
+
+# ── execute_command: 不再清空 download 目录 ──
+print('\n--- execute_command (download 目录保留) ---')
+# 在 download 中放一个文件，执行命令后它应当仍然存在：
+# 现在的策略是注入 -y 覆盖同名输出，而不是每次清空下载目录。
 stale_file = os.path.join(DOWNLOAD, 'stale.txt')
 with open(stale_file, 'w') as f:
     f.write('stale')
 check('stale 文件已创建', os.path.exists(stale_file))
 
-# 执行一个命令（会被拒绝，但清理逻辑在 ffmpeg 命令检验之前执行）
-# 实际上清理逻辑在路径重写之后、执行之前
-# 对于非 ffmpeg 命令，在被拒绝之前已经执行了路径重写？看代码：
-# 1. 安全校验检验命令名 → 如果是非 ffmpeg，直接返回，不执行后续
-# 所以对于非 ffmpeg 命令，清理不会执行。
-# 对于 ffmpeg 命令，清理会执行。
-# 但由于 ffmpeg 不存在，subprocess.run 会报 OSError，清理仍然执行过。
-res2 = execute_command.invoke({'command': 'ffmpeg -i /tmp/nonexistent.mp4 /tmp/out.mp4'})
-# 清理应该在尝试执行之前发生
-remaining = os.listdir(DOWNLOAD)
-check('download 目录在执行前被清理', 'stale.txt' not in remaining)
+execute_command.invoke({'command': 'ffmpeg -i /tmp/nonexistent.mp4 /tmp/out.mp4'})
+check('既有输出文件不会被清空（改为 -y 覆盖策略）', os.path.exists(stale_file))
+os.remove(stale_file)
 
 
 # ── get_command ──
@@ -114,6 +112,29 @@ try:
     check('结果包含 FFmpeg 相关内容', any('color' in str(r).lower() or 'ffmpeg' in str(r).lower() for r in result))
 except Exception as e:
     check(f'查询知识库失败: {e}', False, str(e))
+
+
+# ── 检索条数受 RETRIEVAL_K 约束（控制喂给 LLM 的提示词长度） ──
+print('\n--- RETRIEVAL_K ---')
+from app import db_search as _ds
+check('RETRIEVAL_K 可配置且默认收敛到 8', _ds.RETRIEVAL_K == 8, f'实际 {_ds.RETRIEVAL_K}')
+try:
+    _r = _ds.get_text('how to invert colors')
+    _n = len(_r) if isinstance(_r, list) else -1
+    check(f'get_text 返回条数 <= RETRIEVAL_K（实际 {_n}）', 0 < _n <= _ds.RETRIEVAL_K)
+    _total = sum(len(d.get('content', '')) for d in _r) if isinstance(_r, list) else 0
+    check('检索载荷已收敛（< 12000 字符，避免提示词过长）', _total < 12000, f'实际 {_total}')
+except Exception as e:
+    check(f'RETRIEVAL_K 校验失败: {e}', False, str(e))
+
+# ffprobe 侧同样走共用检索实现
+try:
+    from app.db_search import get_probe_text
+    _rp = get_probe_text('show stream information')
+    _np = len(_rp) if isinstance(_rp, list) else -1
+    check(f'get_probe_text 返回条数 <= RETRIEVAL_K（实际 {_np}）', 0 < _np <= _ds.RETRIEVAL_K)
+except Exception as e:
+    check(f'ffprobe 检索条数校验失败: {e}', False, str(e))
 
 
 # ── execute_probe_command: 安全校验 ──

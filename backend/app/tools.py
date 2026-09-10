@@ -103,6 +103,26 @@ def split_command(cmd: str) -> list:
     return result
 
 
+def _resolve_under_cwd(path: str) -> str:
+    return os.path.realpath(os.path.join(os.getcwd(), path))
+
+
+def _is_inside_download(value: str) -> bool:
+    """判断输出参数是否已经落在 DOWNLOAD 目录内（路径语义，非子串匹配）。
+
+    兼容 `download/x.mp4`、`backend/download/x.mp4`、`./backend/download/x.mp4`
+    等等价写法；裸文件名（`x.mp4`）会解析到 cwd，因此返回 False，交由调用方
+    重写到 DOWNLOAD 目录——这正是期望行为（evaluated: 提示词要求只写文件名）。
+    `-`（stdout 输出）不算。
+    """
+    v = (value or '').strip()
+    if not v or v == '-':
+        return False
+    base = os.path.realpath(DOWNLOAD)
+    real = _resolve_under_cwd(v)
+    return real == base or real.startswith(base + os.sep)
+
+
 def _validate_input(value: str) -> bool:
     """校验 -i 输入源：
     - 虚拟源(lavfi/testsrc/color 等)放行
@@ -306,8 +326,12 @@ def execute_command(command: str, config: RunnableConfig):
         rewritten = False
         for idx in output_indexes:
             original = parts[idx]
-            # 仅当路径尚未指向 DOWNLOAD 时才重写
-            if DOWNLOAD not in original and DOWNLOAD not in os.path.dirname(original):
+            # 仅当路径尚未落在 DOWNLOAD 目录内时才重写。
+            # 这里必须做路径层面的包含判断，而不是子串判断：
+            # 旧写法 `DOWNLOAD not in original` 会把 download/out.mp4 这种
+            # 已正确但未带前缀的相对路径再拼一次，也会让 upload/download_x/ 这类
+            # 恰好包含同名字段的路径被误判。
+            if not _is_inside_download(original):
                 parts[idx] = os.path.join(DOWNLOAD, os.path.basename(original))
                 rewritten = True
         if rewritten:
