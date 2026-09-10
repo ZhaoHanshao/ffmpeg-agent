@@ -1,0 +1,91 @@
+/* 设计 token：颜色 / 圆角 / 阴影 / 字号。
+ *
+ * 为什么集中放这里：此前同一批颜色值（#4f6ef7 出现 20+ 次、#e5e7eb、#9ca3af…）
+ * 硬编码散落在各组件里，改一处配色要翻五个文件且很容易漏。
+ * 组件内不再直接写十六进制色值，统一引用 var(--dsh-*)。
+ */
+
+:root {
+  /* ── 品牌色 ── */
+  --dsh-brand: #4f6ef7;
+  --dsh-brand-strong: #3b5de7;
+  --dsh-brand-soft: #eef1ff;
+  --dsh-brand-line: #c7d2fe;
+
+  /* ── 文字层级（对比度依次降低，均满足正文可读性）── */
+  --dsh-text: #1a1a2e;
+  --dsh-text-2: #4b5563;
+  --dsh-text-3: #6b7280;
+  --dsh-text-4: #9ca3af;
+  --dsh-text-invert: #ffffff;
+
+  /* ── 背景 ── */
+  --dsh-bg: #f4f5f9;
+  --dsh-surface: #ffffff;
+  --dsh-surface-2: #f8f9fc;
+  --dsh-surface-3: #f1f2f6;
+
+  /* ── 描边 ── */
+  --dsh-border: #e5e7eb;
+  --dsh-border-strong: #d1d5db;
+
+  /* ── 语义色 ── */
+  --dsh-danger: #ef4444;
+  --dsh-danger-strong: #dc2626;
+  --dsh-danger-soft: #fef2f2;
+  --dsh-danger-line: #fecaca;
+  --dsh-success: #16a34a;
+  --dsh-success-soft: #f0fdf4;
+  --dsh-success-line: #bbf7d0;
+  --dsh-warn: #b45309;
+  --dsh-warn-soft: #fffbeb;
+  --dsh-warn-line: #fde68a;
+  --dsh-warn-accent: #f59e0b;
+
+  /* ── 圆角 ── */
+  --dsh-r-xs: 6px;
+  --dsh-r-sm: 8px;
+  --dsh-r-md: 10px;
+  --dsh-r-lg: 14px;
+  --dsh-r-xl: 18px;
+  --dsh-r-pill: 999px;
+
+  /* ── 阴影：统一用低透明度多层，避免生硬的单层大黑影 ── */
+  --dsh-shadow-xs: 0 1px 2px rgba(16, 24, 40, 0.04);
+  --dsh-shadow-sm: 0 1px 3px rgba(16, 24, 40, 0.06), 0 1px 2px rgba(16, 24, 40, 0.04);
+  --dsh-shadow-md: 0 4px 12px rgba(16, 24, 40, 0.08), 0 1px 3px rgba(16, 24, 40, 0.04);
+  --dsh-shadow-lg: 0 12px 32px rgba(16, 24, 40, 0.14), 0 2px 8px rgba(16, 24, 40, 0.06);
+  --dsh-shadow-brand: 0 2px 8px rgba(79, 110, 247, 0.28);
+
+  /* ── 焦点环（键盘无障碍）── */
+  --dsh-ring: 0 0 0 3px rgba(79, 110, 247, 0.18);
+
+  /* ── 字号 ── */
+  --dsh-fs-xs: 11px;
+  --dsh-fs-sm: 12px;
+  --dsh-fs-base: 13px;
+  --dsh-fs-md: 14px;
+  --dsh-fs-lg: 15px;
+
+  /* ── 动效 ── */
+  --dsh-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --dsh-dur: 0.16s;
+}
+
+/* 统一键盘焦点样式：鼠标点击不显示，Tab 导航才显示 */
+:focus-visible {
+  outline: 2px solid var(--dsh-brand);
+  outline-offset: 2px;
+}
+
+/* 尊重系统的"减少动态效果"设置 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

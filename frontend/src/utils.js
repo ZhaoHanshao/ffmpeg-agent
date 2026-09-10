@@ -6,6 +6,41 @@ export function isVideo(name) {
   return /\.(mp4|webm|avi|mov|mkv)$/i.test(name)
 }
 
+export function isAudio(name) {
+  return /\.(mp3|wav|flac|aac|m4a|ogg|opus|wma)$/i.test(name)
+}
+
+/** 按扩展名给出文件类型图标与中文类型名，用于文件列表与消息里的文件标签。 */
+export function fileKind(name) {
+  const n = String(name || '').toLowerCase()
+  if (isVideo(n)) return { icon: '🎬', label: '视频' }
+  if (isAudio(n)) return { icon: '🎵', label: '音频' }
+  if (isImage(n)) return { icon: '🖼️', label: '图片' }
+  if (/\.(srt|ass|ssa|vtt|sub)$/.test(n)) return { icon: '💬', label: '字幕' }
+  if (/\.(json|txt|log|xml|csv)$/.test(n)) return { icon: '📝', label: '文本' }
+  return { icon: '📄', label: '文件' }
+}
+
+/** 人类可读的体积；未知（0/非数字）返回空串，便于模板里 v-if 判断。 */
+export function formatSize(bytes) {
+  const n = Number(bytes)
+  if (!Number.isFinite(n) || n <= 0) return ''
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let v = n
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i += 1
+  }
+  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`
+}
+
+/** Content-Length 可能是 null/空串，统一解析成数字（失败返回 0）。 */
+export function parseContentLength(headerValue) {
+  const n = parseInt(headerValue ?? '', 10)
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
 export function sanitizeHtml(html) {
   const doc = new DOMParser().parseFromString(html, 'text/html')
   doc.querySelectorAll('script, iframe, object, embed, link, meta, style').forEach((el) => el.remove())

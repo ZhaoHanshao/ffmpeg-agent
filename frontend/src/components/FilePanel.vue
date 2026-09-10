@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { api, API_BASE } from '../api'
+import { api, API_BASE, authHeaders } from '../api'
+import { fileKind, formatSize, parseContentLength } from '../utils'
 
 const emit = defineEmits(['notify', 'select-output', 'removed'])
 
@@ -17,10 +18,38 @@ const selectedOutput = ref(new Set())
 const batchProcessing = ref(false)
 const dragOver = ref(false)
 const fileInput = ref(null)
+// 文件名 → 体积（字节）。列表接口只返回文件名，这里对每个文件发一次 HEAD
+// 取 Content-Length；失败就按未知处理，不影响列表展示。
+const sizes = ref({})
 
 const allOutputSelected = computed(
   () => outputFiles.value.length > 0 && selectedOutput.value.size === outputFiles.value.length
 )
+
+function sizeOf(name) {
+  return formatSize(sizes.value[name])
+}
+
+async function loadSizes(names, base) {
+  const targets = (names || []).filter((n) => sizes.value[n] === undefined)
+  if (!targets.length) return
+  const results = await Promise.all(
+    targets.map(async (n) => {
+      try {
+        const res = await fetch(`${API_BASE}/${base}/${encodeURIComponent(n)}`, {
+          method: 'HEAD',
+          headers: authHeaders(),
+        })
+        return [n, res.ok ? parseContentLength(res.headers.get('Content-Length')) : 0]
+      } catch {
+        return [n, 0]
+      }
+    })
+  )
+  const next = { ...sizes.value }
+  for (const [n, sz] of results) next[n] = sz
+  sizes.value = next
+}
 
 function toggleOutputFile(file) {
   const s = new Set(selectedOutput.value)
@@ -40,6 +69,7 @@ async function refreshUploadedFiles() {
   try {
     const data = await api.listUpload()
     uploadedFiles.value = data.files || []
+    loadSizes(uploadedFiles.value, 'upload')
   } catch (e) {
     console.error('获取上传文件列表失败:', e)
   } finally {
@@ -52,6 +82,7 @@ async function refreshOutputFiles() {
   try {
     const data = await api.listOutput()
     outputFiles.value = data.files || []
+    loadSizes(outputFiles.value, 'output')
   } catch (e) {
     console.error('获取已完成文件列表失败:', e)
   } finally {
@@ -178,10 +209,12 @@ onMounted(refreshAll)
         <template v-if="!uploadedFiles.length">
           <span class="drop-icon">📁</span>
           <span class="drop-text">拖拽或点击上传文件</span>
+          <span class="drop-sub">支持视频 / 音频 / 图片，可多选</span>
         </template>
         <template v-else>
-          <span class="drop-icon">✅</span>
-          <span class="drop-text">{{ uploadedFiles.length }} 个文件已就绪</span>
+          <span class="drop-icon">＋</span>
+          <span class="drop-text">继续添加文件</span>
+          <span class="drop-sub">已就绪 {{ uploadedFiles.length }} 个</span>
         </template>
         <div v-if="uploading" class="uploading-overlay">
           <div class="spinner" />
@@ -192,12 +225,15 @@ onMounted(refreshAll)
 
     <section class="file-section">
       <div class="section-title">
-        已上传文件
+        <span>已上传文件</span>
         <span v-if="uploadedFiles.length" class="section-count">{{ uploadedFiles.length }}</span>
       </div>
       <div class="file-section-body">
         <div v-if="loadingUpload" class="file-status"><span class="mini-spinner" /> 加载中…</div>
-        <div v-else-if="!uploadedFiles.length" class="file-status empty"><span>暂无上传文件</span></div>
+        <div v-else-if="!uploadedFiles.length" class="file-status empty">
+          <span class="empty-emoji">📂</span>
+          <span>还没有上传文件</span>
+        </div>
         <div v-else class="file-list">
           <div
             v-for="f in uploadedFiles"
@@ -205,22 +241,27 @@ onMounted(refreshAll)
             class="file-row"
             :class="{ selected: isSelected('upload', f) }"
           >
-            <span class="file-icon">📄</span>
-            <span class="file-name" :title="f">{{ f }}</span>
+            <span class="file-icon" :title="fileKind(f).label">{{ fileKind(f).icon }}</span>
+            <div class="file-meta">
+              <span class="file-name" :title="f">{{ f }}</span>
+              <span v-if="sizeOf(f)" class="file-size">{{ sizeOf(f) }}</span>
+            </div>
             <div class="file-actions">
               <button
                 class="file-btn add"
                 :class="{ active: isSelected('upload', f) }"
                 title="加入工作区"
+                aria-label="加入工作区"
                 @click="addToWorkspace(f, 'upload')"
               >＋</button>
               <a
                 :href="`${API_BASE}/upload/${encodeURIComponent(f)}`"
                 class="file-btn download"
                 title="下载"
+                aria-label="下载"
                 download
               >⬇</a>
-              <button class="file-btn delete" title="删除" @click="deleteUploadedFile(f)">🗑</button>
+              <button class="file-btn delete" title="删除" aria-label="删除" @click="deleteUploadedFile(f)">🗑</button>
             </div>
           </div>
         </div>
@@ -230,44 +271,59 @@ onMounted(refreshAll)
     <section class="file-section">
       <div class="section-title">
         <label v-if="outputFiles.length" class="select-all" @click.stop>
-          <input type="checkbox" :checked="allOutputSelected" @change="toggleSelectAllOutput" />
+          <input
+            type="checkbox"
+            :checked="allOutputSelected"
+            aria-label="全选已完成文件"
+            @change="toggleSelectAllOutput"
+          />
         </label>
-        已完成文件
+        <span>已完成文件</span>
         <span v-if="outputFiles.length" class="section-count">{{ outputFiles.length }}</span>
       </div>
       <div class="file-section-body">
         <div v-if="loadingOutput" class="file-status"><span class="mini-spinner" /> 加载中…</div>
-        <div v-else-if="!outputFiles.length" class="file-status empty"><span>暂无完成文件</span></div>
+        <div v-else-if="!outputFiles.length" class="file-status empty">
+          <span class="empty-emoji">🎯</span>
+          <span>处理完成后，生成的文件会出现在这里</span>
+        </div>
         <div v-else class="file-list">
           <div
             v-for="f in outputFiles"
             :key="f"
-            class="file-row"
+            class="file-row selectable"
             :class="{ selected: selectedOutput.has(f) }"
             @click="toggleOutputFile(f)"
           >
             <span
               class="file-checkbox"
               :class="{ checked: selectedOutput.has(f) }"
+              role="checkbox"
+              :aria-checked="selectedOutput.has(f)"
               @click.stop="toggleOutputFile(f)"
             />
-            <span class="file-icon">🎯</span>
-            <span class="file-name" :title="f">{{ f }}</span>
+            <span class="file-icon" :title="fileKind(f).label">{{ fileKind(f).icon }}</span>
+            <div class="file-meta">
+              <span class="file-name" :title="f">{{ f }}</span>
+              <span v-if="sizeOf(f)" class="file-size">{{ sizeOf(f) }}</span>
+            </div>
             <div class="file-actions">
               <button
                 class="file-btn add"
                 :class="{ active: isSelected('output', f) }"
-                title="加入工作区"
+                title="加入工作区（用于下一步处理）"
+                aria-label="加入工作区"
                 @click.stop="addToWorkspace(f, 'output')"
               >＋</button>
               <a
                 :href="`${API_BASE}/output/${encodeURIComponent(f)}`"
                 class="file-btn download"
                 title="下载"
+                aria-label="下载"
                 download
                 @click.stop
               >⬇</a>
-              <button class="file-btn delete" title="删除" @click.stop="deleteOutputFile(f)">🗑</button>
+              <button class="file-btn delete" title="删除" aria-label="删除" @click.stop="deleteOutputFile(f)">🗑</button>
             </div>
           </div>
         </div>
@@ -293,33 +349,46 @@ onMounted(refreshAll)
 
 <style scoped>
 .left-panel {
-  width: 360px;
+  width: 340px;
   flex-shrink: 0;
   overflow: hidden;
-  background: #fff;
-  border-right: 1px solid #e5e7eb;
-  padding: 12px;
+  background: var(--dsh-surface);
+  border-right: 1px solid var(--dsh-border);
+  padding: 14px 14px 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
+  min-height: 0;
 }
 
+/* ── 上传区 ── */
 .upload-section { flex-shrink: 0; }
 .drop-zone {
   position: relative;
-  border: 2px dashed #d1d5db;
-  border-radius: 10px;
-  padding: 16px;
+  border: 1.5px dashed var(--dsh-border-strong);
+  border-radius: var(--dsh-r-lg);
+  padding: 18px 16px;
   text-align: center;
   cursor: pointer;
-  transition: all 0.2s;
-  background: #fafbfc;
+  transition: border-color var(--dsh-dur) var(--dsh-ease), background var(--dsh-dur) var(--dsh-ease);
+  background: var(--dsh-surface-2);
 }
-.drop-zone:hover { border-color: #4f6ef7; background: #f8f9ff; }
-.drop-zone.drag-over { border-color: #4f6ef7; background: #eef1ff; }
-.drop-zone.has-files { border-style: solid; border-color: #22c55e; background: #f0fdf4; }
-.drop-icon { display: block; font-size: 24px; margin-bottom: 2px; }
-.drop-text { display: block; font-size: 13px; font-weight: 500; color: #374151; }
+.drop-zone:hover { border-color: var(--dsh-brand-line); background: var(--dsh-brand-soft); }
+.drop-zone.drag-over {
+  border-color: var(--dsh-brand);
+  background: var(--dsh-brand-soft);
+  box-shadow: var(--dsh-ring);
+}
+.drop-zone.has-files {
+  border-style: solid;
+  border-color: var(--dsh-success-line);
+  background: var(--dsh-success-soft);
+  padding: 13px 16px;
+}
+.drop-icon { display: block; font-size: 22px; margin-bottom: 3px; line-height: 1.2; }
+.drop-zone.has-files .drop-icon { font-size: 17px; color: var(--dsh-success); font-weight: 600; }
+.drop-text { display: block; font-size: var(--dsh-fs-base); font-weight: 600; color: var(--dsh-text-2); }
+.drop-sub { display: block; font-size: var(--dsh-fs-sm); color: var(--dsh-text-4); margin-top: 2px; }
 .uploading-overlay {
   position: absolute;
   inset: 0;
@@ -327,16 +396,17 @@ onMounted(refreshAll)
   align-items: center;
   justify-content: center;
   gap: 8px;
-  background: rgba(255, 255, 255, 0.85);
-  border-radius: 10px;
-  font-size: 13px;
-  color: #4f6ef7;
+  background: rgba(255, 255, 255, 0.88);
+  border-radius: var(--dsh-r-lg);
+  font-size: var(--dsh-fs-base);
+  color: var(--dsh-brand);
+  font-weight: 500;
 }
 .uploading-overlay .spinner {
   width: 16px;
   height: 16px;
-  border: 2px solid #e5e7eb;
-  border-top-color: #4f6ef7;
+  border: 2px solid var(--dsh-border);
+  border-top-color: var(--dsh-brand);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
 }
@@ -351,112 +421,135 @@ onMounted(refreshAll)
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  padding-right: 2px;
 }
 .file-section-body::-webkit-scrollbar { width: 6px; }
-.file-section-body::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+.file-section-body::-webkit-scrollbar-thumb {
+  background: #dfe3ea;
+  border-radius: var(--dsh-r-pill);
+}
 .section-title {
-  font-size: 13px;
+  font-size: var(--dsh-fs-sm);
   font-weight: 600;
-  color: #6b7280;
-  padding: 8px 0 4px;
+  color: var(--dsh-text-3);
+  padding: 10px 2px 6px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 6px;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.02em;
 }
 .section-count {
-  font-size: 11px;
-  font-weight: 500;
-  color: #9ca3af;
-  background: #f3f4f6;
+  font-size: var(--dsh-fs-xs);
+  font-weight: 600;
+  color: var(--dsh-text-3);
+  background: var(--dsh-surface-3);
   padding: 1px 7px;
-  border-radius: 10px;
-  line-height: 18px;
+  border-radius: var(--dsh-r-pill);
+  line-height: 17px;
 }
 .file-status {
-  padding: 8px 0;
-  font-size: 13px;
-  color: #9ca3af;
+  padding: 10px 2px;
+  font-size: var(--dsh-fs-base);
+  color: var(--dsh-text-4);
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
 }
-.file-status.empty { padding: 14px 0; text-align: center; justify-content: center; }
+.file-status.empty {
+  flex-direction: column;
+  gap: 4px;
+  padding: 26px 12px;
+  text-align: center;
+  line-height: 1.6;
+}
+.file-status.empty .empty-emoji { font-size: 20px; opacity: 0.6; }
 .mini-spinner {
   display: inline-block;
   width: 12px;
   height: 12px;
-  border: 2px solid #e5e7eb;
-  border-top-color: #4f6ef7;
+  border: 2px solid var(--dsh-border);
+  border-top-color: var(--dsh-brand);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
 }
 
-.file-list { display: flex; flex-direction: column; gap: 2px; }
+.file-list { display: flex; flex-direction: column; gap: 1px; }
 .file-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  transition: background 0.15s;
+  gap: 9px;
+  padding: 7px 8px;
+  border-radius: var(--dsh-r-sm);
+  transition: background var(--dsh-dur) var(--dsh-ease);
   cursor: default;
+  min-width: 0;
 }
-.file-row:hover { background: #f0f2f5; }
-.file-icon { font-size: 14px; flex-shrink: 0; line-height: 1; }
+.file-row:hover { background: var(--dsh-surface-2); }
+.file-row.selectable { cursor: pointer; }
+.file-row.selected { background: var(--dsh-brand-soft); }
+.file-row.selected:hover { background: #e3e8ff; }
+.file-icon { font-size: 15px; flex-shrink: 0; line-height: 1; }
+.file-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .file-name {
-  flex: 1;
-  font-size: 13px;
-  color: #374151;
+  font-size: var(--dsh-fs-base);
+  color: var(--dsh-text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
 }
+.file-row.selected .file-name { color: var(--dsh-text); font-weight: 500; }
+.file-size {
+  font-size: var(--dsh-fs-xs);
+  color: var(--dsh-text-4);
+  font-variant-numeric: tabular-nums;
+}
 .file-actions {
   display: flex;
-  gap: 2px;
+  gap: 1px;
   flex-shrink: 0;
   opacity: 0;
-  transition: opacity 0.15s;
+  transition: opacity var(--dsh-dur) var(--dsh-ease);
 }
 .file-row:hover .file-actions,
-.file-row.selected .file-actions { opacity: 1; }
+.file-row.selected .file-actions,
+.file-row:focus-within .file-actions { opacity: 1; }
 .file-btn {
   background: none;
   border: none;
   cursor: pointer;
-  font-size: 14px;
-  padding: 4px;
-  border-radius: 4px;
+  font-size: 13px;
+  padding: 0;
+  border-radius: var(--dsh-r-xs);
   line-height: 1;
-  transition: background 0.15s;
+  transition: background var(--dsh-dur) var(--dsh-ease);
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
+  color: var(--dsh-text-3);
 }
-.file-btn:hover { background: #e5e7eb; text-decoration: none; }
-.file-btn.add:hover { background: #eef1ff; }
-.file-btn.add.active { background: #eef1ff; color: #4f6ef7; font-weight: 700; }
-.file-btn.delete:hover { background: #fee2e2; }
+.file-btn:hover { background: #e6e8ee; text-decoration: none; }
+.file-btn.add:hover { background: var(--dsh-brand-soft); color: var(--dsh-brand); }
+.file-btn.add.active { background: var(--dsh-brand); color: #fff; }
+.file-btn.delete:hover { background: var(--dsh-danger-soft); color: var(--dsh-danger); }
 
 .file-checkbox {
   width: 16px;
   height: 16px;
-  border: 2px solid #d1d5db;
-  border-radius: 3px;
+  border: 1.5px solid var(--dsh-border-strong);
+  border-radius: 4px;
   flex-shrink: 0;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--dsh-dur) var(--dsh-ease);
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #fff;
+  background: var(--dsh-surface);
 }
-.file-checkbox.checked { background: #4f6ef7; border-color: #4f6ef7; }
+.file-checkbox.checked { background: var(--dsh-brand); border-color: var(--dsh-brand); }
 .file-checkbox.checked::after {
   content: '';
   width: 4px;
@@ -465,12 +558,10 @@ onMounted(refreshAll)
   border-width: 0 2px 2px 0;
   transform: rotate(45deg) translateY(-1px);
 }
-.file-row:hover .file-checkbox { border-color: #4f6ef7; }
-.file-row.selected { background: #eef1ff; }
-.file-row.selected:hover { background: #e0e5ff; }
+.file-row:hover .file-checkbox { border-color: var(--dsh-brand); }
 
 .select-all { display: flex; align-items: center; cursor: pointer; }
-.select-all input { width: 14px; height: 14px; accent-color: #4f6ef7; cursor: pointer; }
+.select-all input { width: 14px; height: 14px; accent-color: var(--dsh-brand); cursor: pointer; }
 
 .batch-bar {
   flex-shrink: 0;
@@ -478,27 +569,32 @@ onMounted(refreshAll)
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 10px;
-  background: #fff;
-  border-top: 1px solid #e5e7eb;
-  margin: 0 -12px -12px;
-  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
+  padding: 9px 10px;
+  background: var(--dsh-surface);
+  border-top: 1px solid var(--dsh-border);
+  margin: 6px -14px -12px;
+  box-shadow: 0 -3px 10px rgba(16, 24, 40, 0.06);
 }
-.batch-count { font-size: 12px; color: #374151; font-weight: 500; white-space: nowrap; }
+.batch-count { font-size: var(--dsh-fs-sm); color: var(--dsh-text-2); font-weight: 600; white-space: nowrap; }
 .batch-actions { display: flex; gap: 6px; }
 .batch-btn {
   padding: 5px 12px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  font-size: 12px;
+  border: 1px solid var(--dsh-border-strong);
+  border-radius: var(--dsh-r-sm);
+  font-size: var(--dsh-fs-sm);
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s;
-  background: #fff;
+  transition: all var(--dsh-dur) var(--dsh-ease);
+  background: var(--dsh-surface);
+  color: var(--dsh-text-2);
   white-space: nowrap;
 }
-.batch-btn:hover:not(:disabled) { border-color: #4f6ef7; color: #4f6ef7; }
-.batch-btn.download:hover:not(:disabled) { background: #eef1ff; }
-.batch-btn.delete:hover:not(:disabled) { background: #fef2f2; border-color: #ef4444; color: #ef4444; }
-.batch-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.batch-btn:hover:not(:disabled) { border-color: var(--dsh-brand); color: var(--dsh-brand); }
+.batch-btn.download:hover:not(:disabled) { background: var(--dsh-brand-soft); }
+.batch-btn.delete:hover:not(:disabled) {
+  background: var(--dsh-danger-soft);
+  border-color: var(--dsh-danger);
+  color: var(--dsh-danger);
+}
+.batch-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 </style>

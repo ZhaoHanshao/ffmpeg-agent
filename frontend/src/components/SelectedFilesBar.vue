@@ -26,13 +26,13 @@ const emit = defineEmits(['remove', 'add'])
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 8px 20px 0;
+  padding: 10px 24px 0;
   flex-shrink: 0;
 }
 .bar-label {
-  font-size: 12px;
+  font-size: var(--dsh-fs-sm);
   font-weight: 600;
-  color: #6b7280;
+  color: var(--dsh-text-3);
   line-height: 28px;
   white-space: nowrap;
   padding-top: 1px;
@@ -48,12 +48,12 @@ const emit = defineEmits(['remove', 'add'])
   display: flex;
   align-items: center;
   gap: 5px;
-  background: #eef1ff;
-  border: 1px solid #c7d2fe;
-  border-radius: 999px;
+  background: var(--dsh-brand-soft);
+  border: 1px solid var(--dsh-brand-line);
+  border-radius: var(--dsh-r-pill);
   padding: 3px 8px 3px 10px;
-  font-size: 12px;
-  color: #374151;
+  font-size: var(--dsh-fs-sm);
+  color: var(--dsh-text-2);
   max-width: 100%;
 }
 .chip-icon { font-size: 12px; flex-shrink: 0; }
@@ -65,11 +65,12 @@ const emit = defineEmits(['remove', 'add'])
 }
 .chip-tag {
   font-size: 10px;
-  color: #b45309;
-  background: #fef3c7;
-  border-radius: 999px;
+  color: var(--dsh-warn);
+  background: var(--dsh-warn-soft);
+  border: 1px solid var(--dsh-warn-line);
+  border-radius: var(--dsh-r-pill);
   padding: 0 6px;
-  line-height: 16px;
+  line-height: 15px;
   flex-shrink: 0;
 }
 .chip-remove {
@@ -77,24 +78,24 @@ const emit = defineEmits(['remove', 'add'])
   border: none;
   cursor: pointer;
   font-size: 12px;
-  color: #6b7280;
+  color: var(--dsh-text-3);
   padding: 0 2px;
   line-height: 1;
   border-radius: 50%;
   flex-shrink: 0;
-  transition: all 0.15s;
+  transition: all var(--dsh-dur) var(--dsh-ease);
 }
-.chip-remove:hover { color: #ef4444; background: #fee2e2; }
+.chip-remove:hover { color: var(--dsh-danger); background: var(--dsh-danger-soft); }
 .chip-add {
-  background: #fff;
-  border: 1px dashed #c7d2fe;
-  border-radius: 999px;
+  background: var(--dsh-surface);
+  border: 1px dashed var(--dsh-brand-line);
+  border-radius: var(--dsh-r-pill);
   padding: 3px 12px;
-  font-size: 12px;
-  color: #4f6ef7;
+  font-size: var(--dsh-fs-sm);
+  color: var(--dsh-brand);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--dsh-dur) var(--dsh-ease);
   white-space: nowrap;
 }
-.chip-add:hover { background: #eef1ff; border-color: #4f6ef7; }
+.chip-add:hover { background: var(--dsh-brand-soft); border-color: var(--dsh-brand); }
 </style>

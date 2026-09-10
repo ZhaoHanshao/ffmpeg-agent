@@ -165,21 +165,44 @@ onUnmounted(() => {
     <!-- ── 顶栏 ── -->
     <header class="header">
       <div class="header-inner">
-        <span class="logo">🎬 FFmpeg Agent</span>
-        <span class="subtitle">{{ mode === 'ffprobe' ? '自然语言 → FFprobe 分析' : '自然语言 → FFmpeg 命令' }}</span>
+        <div class="brand">
+          <span class="logo">🎬 FFmpeg Agent</span>
+          <span class="subtitle">{{ mode === 'ffprobe' ? '自然语言 → FFprobe 分析' : '自然语言 → FFmpeg 命令' }}</span>
+        </div>
         <div class="header-spacer" />
-        <div class="mode-switch">
-          <button class="mode-btn" :class="{ active: mode === 'ffmpeg' }" @click="mode = 'ffmpeg'">FFmpeg 处理</button>
-          <button class="mode-btn" :class="{ active: mode === 'ffprobe' }" @click="mode = 'ffprobe'">FFprobe 分析</button>
+        <div class="mode-switch" role="tablist" aria-label="工作模式">
+          <button
+            class="mode-btn"
+            :class="{ active: mode === 'ffmpeg' }"
+            role="tab"
+            :aria-selected="mode === 'ffmpeg'"
+            @click="mode = 'ffmpeg'"
+          ><span class="mode-dot" />FFmpeg 处理</button>
+          <button
+            class="mode-btn"
+            :class="{ active: mode === 'ffprobe' }"
+            role="tab"
+            :aria-selected="mode === 'ffprobe'"
+            @click="mode = 'ffprobe'"
+          ><span class="mode-dot" />FFprobe 分析</button>
         </div>
         <button
           class="icon-btn"
           :class="{ active: !leftCollapsed }"
           title="切换文件列表"
+          aria-label="切换文件列表"
           @click="leftCollapsed = !leftCollapsed"
         >📁</button>
-        <button class="icon-btn" title="清空对话" @click="clearMessages">🗑️</button>
-        <button class="icon-btn" title="LLM 设置" @click="showSettings = true">⚙️</button>
+        <button class="icon-btn" title="清空对话" aria-label="清空对话" @click="clearMessages">🗑️</button>
+        <button class="icon-btn" title="LLM 设置" aria-label="LLM 设置" @click="showSettings = true">
+          ⚙️
+          <span
+            v-if="configured !== null"
+            class="status-dot"
+            :class="configured ? 'on' : 'off'"
+            :title="configured ? 'LLM 已配置' : 'LLM 未配置'"
+          />
+        </button>
       </div>
     </header>
 
@@ -220,15 +243,41 @@ onUnmounted(() => {
       <main class="right-panel">
         <div ref="chatContainer" class="chat-messages" @scroll="onChatScroll">
           <div v-if="!messages.length" class="empty-chat">
-            <div class="empty-icon">💬</div>
-            <p>{{ mode === 'ffprobe' ? '选择文件后，告诉我你想查看文件的哪些信息' : '选择文件后，告诉我你想对文件做什么' }}</p>
-            <p v-if="!hasFiles" class="empty-hint">在左侧面板点击 ＋ 将文件加入工作区，再输入需求；不选文件也可以直接提问 FFmpeg/FFprobe 知识</p>
+            <div class="empty-icon">{{ mode === 'ffprobe' ? '🔍' : '💬' }}</div>
+            <p class="empty-title">{{ mode === 'ffprobe' ? '想查看这个文件的哪些信息？' : '想对这个文件做什么？' }}</p>
+            <p class="empty-hint">
+              在左侧点击 <b>＋</b> 把文件加入工作区，再用自然语言描述需求；
+              不选文件也可以直接提问 FFmpeg / FFprobe 知识。
+            </p>
             <p class="examples">
-              <button v-if="mode === 'ffprobe'" class="example-chip" @click="useExample('查看视频的分辨率和编码')">查看视频的分辨率和编码</button>
-              <button v-if="mode === 'ffprobe'" class="example-chip" @click="useExample('查看音频采样率')">查看音频采样率</button>
-              <button v-if="mode !== 'ffprobe'" class="example-chip" @click="useExample('把图片反色')">把图片反色</button>
-              <button v-if="mode !== 'ffprobe'" class="example-chip" @click="useExample('转成 mp4')">转成 mp4</button>
-              <button v-if="mode !== 'ffprobe'" class="example-chip" @click="useExample('裁剪中间 10 秒')">裁剪中间 10 秒</button>
+              <template v-if="mode === 'ffprobe'">
+                <button class="example-chip" @click="useExample('查看视频的分辨率和编码')">
+                  查看视频的分辨率和编码<span class="chip-arrow">→</span>
+                </button>
+                <button class="example-chip" @click="useExample('查看音频采样率')">
+                  查看音频采样率<span class="chip-arrow">→</span>
+                </button>
+                <button class="example-chip" @click="useExample('列出所有流的详细信息')">
+                  列出所有流的详细信息<span class="chip-arrow">→</span>
+                </button>
+              </template>
+              <template v-else>
+                <button class="example-chip" @click="useExample('把图片反色')">
+                  把图片反色<span class="chip-arrow">→</span>
+                </button>
+                <button class="example-chip" @click="useExample('转成 mp4')">
+                  转成 mp4<span class="chip-arrow">→</span>
+                </button>
+                <button class="example-chip" @click="useExample('裁剪中间 10 秒')">
+                  裁剪中间 10 秒<span class="chip-arrow">→</span>
+                </button>
+                <button class="example-chip" @click="useExample('提取音频为 mp3')">
+                  提取音频为 mp3<span class="chip-arrow">→</span>
+                </button>
+                <button class="example-chip" @click="useExample('缩放到 1280x720')">
+                  缩放到 1280x720<span class="chip-arrow">→</span>
+                </button>
+              </template>
             </p>
           </div>
 
@@ -243,17 +292,25 @@ onUnmounted(() => {
           @add="filePanel?.triggerUpload()"
         />
         <footer class="input-bar">
-          <textarea
-            ref="textareaRef"
-            v-model="question"
-            :placeholder="mode === 'ffprobe' ? '输入你想查看的文件信息…' : '输入你对文件的处理需求…'"
-            rows="1"
-            :disabled="sending"
-            @keydown="onKeydown"
-            @input="autoResize"
-          />
-          <button v-if="!sending" class="send-btn" :disabled="!canSend" @click="onSend">发送</button>
-          <button v-else class="send-btn stop" @click="stopChat">⏹ 停止</button>
+          <div class="input-shell">
+            <textarea
+              ref="textareaRef"
+              v-model="question"
+              :placeholder="mode === 'ffprobe' ? '输入你想查看的文件信息…' : '输入你对文件的处理需求…'"
+              rows="1"
+              :disabled="sending"
+              aria-label="输入需求"
+              @keydown="onKeydown"
+              @input="autoResize"
+            />
+            <button v-if="!sending" class="send-btn" :disabled="!canSend" @click="onSend">发送</button>
+            <button v-else class="send-btn stop" @click="stopChat">
+              <span class="stop-icon" aria-hidden="true" />停止
+            </button>
+          </div>
+          <div class="input-hint">
+            <kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行
+          </div>
         </footer>
       </main>
     </div>
@@ -265,13 +322,17 @@ onUnmounted(() => {
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
-  background: #f0f2f5;
-  color: #1a1a2e;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--dsh-bg);
+  color: var(--dsh-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 #app { height: 100%; }
-a { color: #4f6ef7; text-decoration: none; }
+/* 只给正文里的链接加样式，避免影响用户气泡等自定义底色区域 */
+a { color: var(--dsh-brand); text-decoration: none; }
 a:hover { text-decoration: underline; }
+button { font-family: inherit; }
 
 /* ── App Layout ── */
 .app {
@@ -282,68 +343,111 @@ a:hover { text-decoration: underline; }
 
 /* ── Header ── */
 .header {
-  padding: 14px 20px;
-  background: #fff;
-  border-bottom: 1px solid #e5e7eb;
+  padding: 12px 20px;
+  background: var(--dsh-surface);
+  border-bottom: 1px solid var(--dsh-border);
   flex-shrink: 0;
+  position: relative;
+  z-index: 2;
 }
 .header-inner {
   display: flex;
   align-items: center;
   gap: 12px;
 }
-.logo { font-size: 20px; font-weight: 700; color: #1a1a2e; white-space: nowrap; }
-.subtitle { font-size: 13px; color: #9ca3af; white-space: nowrap; }
+.brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.logo {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--dsh-text);
+  white-space: nowrap;
+  letter-spacing: -0.01em;
+}
+.subtitle {
+  font-size: var(--dsh-fs-base);
+  color: var(--dsh-text-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .header-spacer { flex: 1; }
 
 /* ── Header Controls ── */
 .mode-switch {
   display: flex;
-  background: #f3f4f6;
-  border-radius: 8px;
+  background: var(--dsh-surface-3);
+  border-radius: var(--dsh-r-md);
   padding: 3px;
   gap: 2px;
 }
 .mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   background: none;
   border: none;
-  border-radius: 6px;
-  padding: 5px 12px;
-  font-size: 13px;
+  border-radius: var(--dsh-r-sm);
+  padding: 6px 13px;
+  font-size: var(--dsh-fs-base);
   font-weight: 500;
-  color: #6b7280;
+  color: var(--dsh-text-3);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: color var(--dsh-dur) var(--dsh-ease), background var(--dsh-dur) var(--dsh-ease);
   white-space: nowrap;
 }
-.mode-btn:hover { color: #374151; }
+.mode-btn:hover { color: var(--dsh-text-2); }
 .mode-btn.active {
-  background: #fff;
-  color: #4f6ef7;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  background: var(--dsh-surface);
+  color: var(--dsh-brand);
+  box-shadow: var(--dsh-shadow-sm);
 }
+.mode-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.55;
+  flex-shrink: 0;
+}
+.mode-btn.active .mode-dot { opacity: 1; }
+
 .icon-btn {
+  position: relative;
   background: none;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
+  border: 1px solid var(--dsh-border);
+  border-radius: var(--dsh-r-sm);
   cursor: pointer;
-  font-size: 16px;
-  padding: 4px 10px;
-  line-height: 1;
-  transition: all 0.15s;
+  font-size: 15px;
+  padding: 5px 10px;
+  line-height: 1.2;
+  color: var(--dsh-text-2);
+  transition: background var(--dsh-dur) var(--dsh-ease), border-color var(--dsh-dur) var(--dsh-ease);
 }
-.icon-btn:hover { background: #f3f4f6; border-color: #d1d5db; }
-.icon-btn.active { background: #eef1ff; border-color: #4f6ef7; }
+.icon-btn:hover { background: var(--dsh-surface-3); border-color: var(--dsh-border-strong); }
+.icon-btn.active { background: var(--dsh-brand-soft); border-color: var(--dsh-brand-line); }
+/* 已配置 LLM 时在齿轮上点一个小绿点，省得用户反复打开设置确认 */
+.icon-btn .status-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--dsh-surface);
+}
+.status-dot.on { background: var(--dsh-success); }
+.status-dot.off { background: var(--dsh-danger); }
 
 /* ── Body (two-column) ── */
 .body {
   flex: 1;
   display: flex;
   overflow: hidden;
+  min-height: 0;
 }
 
 /* 左侧面板折叠（类名由父级传入，命中 FilePanel 根元素） */
-.left-panel { transition: margin-left 0.25s ease; }
+.left-panel { transition: margin-left 0.25s var(--dsh-ease); }
 .left-panel.collapsed { margin-left: -361px; }
 
 /* ===== Right Panel ===== */
@@ -359,13 +463,19 @@ a:hover { text-decoration: underline; }
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 16px 20px;
+  padding: 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 .chat-messages::-webkit-scrollbar { width: 8px; }
-.chat-messages::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
+.chat-messages::-webkit-scrollbar-thumb {
+  background: #d5d9e2;
+  border-radius: var(--dsh-r-pill);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.chat-messages::-webkit-scrollbar-thumb:hover { background: #b9bfcc; background-clip: content-box; }
 
 .empty-chat {
   flex: 1;
@@ -373,76 +483,163 @@ a:hover { text-decoration: underline; }
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #9ca3af;
   text-align: center;
-  gap: 4px;
+  gap: 6px;
+  padding-bottom: 24px;
 }
-.empty-icon { font-size: 48px; margin-bottom: 8px; }
-.empty-chat p { font-size: 14px; }
-.empty-hint { font-size: 12px !important; color: #b8bfcc; }
+.empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--dsh-r-xl);
+  background: var(--dsh-surface);
+  border: 1px solid var(--dsh-border);
+  box-shadow: var(--dsh-shadow-sm);
+  font-size: 26px;
+  margin-bottom: 14px;
+}
+.empty-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--dsh-text);
+  letter-spacing: -0.01em;
+}
+.empty-hint {
+  font-size: var(--dsh-fs-base);
+  color: var(--dsh-text-4);
+  max-width: 460px;
+  line-height: 1.6;
+}
 .examples {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 8px;
-  margin-top: 12px;
-  max-width: 480px;
+  margin-top: 20px;
+  max-width: 560px;
 }
 .example-chip {
-  border: 1px solid #d1d5db;
-  background: #fff;
-  color: #4f6ef7;
-  border-radius: 999px;
-  padding: 6px 14px;
-  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--dsh-border);
+  background: var(--dsh-surface);
+  color: var(--dsh-text-2);
+  border-radius: var(--dsh-r-pill);
+  padding: 7px 15px;
+  font-size: var(--dsh-fs-base);
   cursor: pointer;
-  transition: all 0.15s;
+  box-shadow: var(--dsh-shadow-xs);
+  transition: all var(--dsh-dur) var(--dsh-ease);
 }
-.example-chip:hover { border-color: #4f6ef7; background: #eef1ff; }
+.example-chip:hover {
+  border-color: var(--dsh-brand-line);
+  background: var(--dsh-brand-soft);
+  color: var(--dsh-brand);
+  box-shadow: var(--dsh-shadow-sm);
+  transform: translateY(-1px);
+}
+.example-chip:active { transform: translateY(0); }
+.example-chip .chip-arrow { opacity: 0.45; font-size: 11px; }
+.example-chip:hover .chip-arrow { opacity: 1; }
 
 /* ── Input Bar ── */
 .input-bar {
-  display: flex;
-  gap: 8px;
-  padding: 12px 20px 16px;
-  border-top: 1px solid #e5e7eb;
-  background: #f0f2f5;
   flex-shrink: 0;
+  padding: 12px 20px 16px;
+  background: var(--dsh-bg);
+}
+.input-shell {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  background: var(--dsh-surface);
+  border: 1px solid var(--dsh-border-strong);
+  border-radius: var(--dsh-r-lg);
+  padding: 8px 8px 8px 14px;
+  box-shadow: var(--dsh-shadow-sm);
+  transition: border-color var(--dsh-dur) var(--dsh-ease), box-shadow var(--dsh-dur) var(--dsh-ease);
+}
+.input-shell:focus-within {
+  border-color: var(--dsh-brand);
+  box-shadow: var(--dsh-shadow-md), var(--dsh-ring);
 }
 .input-bar textarea {
   flex: 1;
-  border: 1px solid #d1d5db;
-  border-radius: 10px;
-  padding: 10px 14px;
-  font-size: 14px;
+  border: none;
+  padding: 6px 0;
+  font-size: var(--dsh-fs-md);
   font-family: inherit;
+  line-height: 1.5;
   resize: none;
   outline: none;
   overflow: hidden;
   scrollbar-width: none;
-  transition: border-color 0.2s;
-  background: #fff;
+  background: transparent;
+  color: var(--dsh-text);
+  max-height: 168px;
 }
+.input-bar textarea::placeholder { color: var(--dsh-text-4); }
 .input-bar textarea::-webkit-scrollbar { display: none; }
-.input-bar textarea:focus { border-color: #4f6ef7; }
-.input-bar textarea:disabled { opacity: 0.5; }
+.input-bar textarea:disabled { opacity: 0.6; }
 
 .send-btn {
-  padding: 0 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 16px;
   border: none;
-  border-radius: 10px;
-  background: #4f6ef7;
-  color: #fff;
-  font-size: 14px;
+  border-radius: var(--dsh-r-md);
+  background: var(--dsh-brand);
+  color: var(--dsh-text-invert);
+  font-size: var(--dsh-fs-md);
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.2s;
-  white-space: nowrap;
+  flex-shrink: 0;
+  box-shadow: var(--dsh-shadow-brand);
+  transition: all var(--dsh-dur) var(--dsh-ease);
 }
-.send-btn:hover:not(:disabled) { background: #3b5de7; }
-.send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.send-btn.stop { background: #ef4444; }
-.send-btn.stop:hover { background: #dc2626; }
+.send-btn:hover:not(:disabled) { background: var(--dsh-brand-strong); }
+.send-btn:active:not(:disabled) { transform: translateY(1px); }
+.send-btn:disabled {
+  background: var(--dsh-surface-3);
+  color: var(--dsh-text-4);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+.send-btn.stop {
+  background: var(--dsh-danger);
+  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+}
+.send-btn.stop:hover { background: var(--dsh-danger-strong); }
+/* 用 CSS 方块代替 ⏹ emoji：emoji 在不同平台粗细/大小不一 */
+.stop-icon {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.input-hint {
+  margin-top: 7px;
+  padding-left: 2px;
+  font-size: var(--dsh-fs-sm);
+  color: var(--dsh-text-4);
+}
+.input-hint kbd {
+  font-family: inherit;
+  font-size: var(--dsh-fs-xs);
+  background: var(--dsh-surface);
+  border: 1px solid var(--dsh-border);
+  border-bottom-width: 2px;
+  border-radius: var(--dsh-r-xs);
+  padding: 0 5px;
+  color: var(--dsh-text-3);
+}
 
 /* ── Keyframes ── */
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -453,49 +650,54 @@ a:hover { text-decoration: underline; }
   align-items: center;
   gap: 10px;
   padding: 10px 20px;
-  background: #fff7e6;
-  color: #b45309;
-  border-bottom: 1px solid #fde68a;
-  font-size: 13px;
+  background: var(--dsh-warn-soft);
+  color: var(--dsh-warn);
+  border-bottom: 1px solid var(--dsh-warn-line);
+  font-size: var(--dsh-fs-base);
   flex-shrink: 0;
 }
 .init-banner.error {
-  background: #fef2f2;
-  color: #b91c1c;
-  border-bottom-color: #fecaca;
+  background: var(--dsh-danger-soft);
+  color: var(--dsh-danger-strong);
+  border-bottom-color: var(--dsh-danger-line);
   white-space: pre-wrap;
   word-break: break-all;
 }
 .init-spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid #f59e0b;
+  border: 2px solid var(--dsh-warn-accent);
   border-top-color: transparent;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   flex-shrink: 0;
 }
-.init-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.init-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .init-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.init-pct { font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.init-pct { font-variant-numeric: tabular-nums; flex-shrink: 0; font-weight: 600; }
 .init-bar {
   height: 5px;
-  background: #fde68a;
-  border-radius: 999px;
+  background: var(--dsh-warn-line);
+  border-radius: var(--dsh-r-pill);
   overflow: hidden;
 }
 .init-fill {
   height: 100%;
-  background: #f59e0b;
-  border-radius: 999px;
-  transition: width 0.4s ease;
+  background: var(--dsh-warn-accent);
+  border-radius: var(--dsh-r-pill);
+  transition: width 0.4s var(--dsh-ease);
 }
 
 /* ── Responsive ── */
-@media (max-width: 640px) {
+@media (max-width: 900px) {
   .subtitle { display: none; }
+}
+@media (max-width: 640px) {
   .header { padding: 10px 12px; }
-  .chat-messages { padding: 12px; }
+  .logo { font-size: 15px; }
+  .chat-messages { padding: 14px 12px; }
   .input-bar { padding: 10px 12px 12px; }
+  .input-hint { display: none; }
+  .mode-btn { padding: 6px 10px; }
 }
 </style>
