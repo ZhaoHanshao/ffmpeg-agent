@@ -11,7 +11,8 @@ logger = logging.getLogger(__name__)
 DOWNLOAD = os.getenv('DOWNLOAD', 'backend/download')
 UPLOAD = os.getenv('UPLOAD', 'backend/upload')
 
-# 串行化"清空下载目录 + 执行命令"整段临界区，避免并发请求互相删除对方的输入/输出文件
+# 串行化"执行 ffmpeg 命令"整段临界区：并发 ffmpeg 写同一输出文件会互相踩踏。
+# 历史上这里注释写的是"清空下载目录"，但该行为已改为注入 -y 覆盖，注释同步更正。
 _execute_lock = threading.Lock()
 
 # 单条命令最长执行时间(秒),超时强制终止,防止失控命令占死线程
@@ -19,6 +20,13 @@ try:
     EXEC_TIMEOUT = int(os.getenv('FFMPEG_TIMEOUT', '1800'))
 except ValueError:
     EXEC_TIMEOUT = 1800
+
+# ffprobe 是只读分析，正常应在秒级返回；沿用 1800s 会让"卡住的探测"把分析功能
+# 挂起半小时，因此单独给一个短得多的默认超时。
+try:
+    PROBE_TIMEOUT = int(os.getenv('FFPROBE_TIMEOUT', '120'))
+except ValueError:
+    PROBE_TIMEOUT = 120
 
 # 允许作为 -i 输入的 lavfi 虚拟源(无真实文件路径)
 VIRTUAL_SOURCES = {
@@ -457,19 +465,23 @@ def execute_probe_command(command: str, config: RunnableConfig):
                                  + '、'.join(denied) + '。请只使用 get_files 返回的文件。',
             }
         run_parts[0] = ffmpeg_bin('ffprobe')
-        returncode, stdout, stderr = _run_binary(run_parts, EXEC_TIMEOUT, 'ffprobe', stop_event, proc_box)
+        returncode, stdout, stderr = _run_binary(run_parts, PROBE_TIMEOUT, 'ffprobe', stop_event, proc_box)
+        output = stdout.strip()
         if returncode == 0:
-            output = stdout.strip()
             return {
                 'command': command,
                 'flag': True,
                 'command_result': output or f'{command} 执行成功',
             }
-        else:
-            return {
-                'command': command,
-                'command_result': f'{command} 执行失败：{stderr[-2000:]}',
-            }
+        # 失败时保留已有的 stdout：ffprobe 常先打印部分结果再报错
+        # （例如某个 stream 有问题），这些内容比只看 stderr 更有用。
+        detail = output or stderr[-2000:]
+        if output and stderr.strip():
+            detail = f'{output}\n[stderr] {stderr[-1000:]}'
+        return {
+            'command': command,
+            'command_result': f'{command} 执行失败：{detail}',
+        }
     except OSError as e:
         return {
             'command': command,
