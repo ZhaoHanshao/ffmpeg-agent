@@ -11,6 +11,9 @@ export function useChat(mode) {
   const autoScroll = ref(true)
   let controller = null
   let rafId = 0
+  // 当前流式任务的 job_id：必须声明在 composable 作用域，
+  // stopChat() 才能读到它（之前误声明在 sendMessage 内，导致停止按钮抛 ReferenceError）
+  let jobId = ''
 
   const canSend = computed(() => !sending.value && question.value.trim() !== '')
 
@@ -58,7 +61,7 @@ export function useChat(mode) {
 
     const ac = new AbortController()
     controller = ac
-    let jobId = ''
+    jobId = ''
     let lastStatus = ''
     const endpoint = mode.value === 'ffprobe' ? '/probe/chat' : '/chat'
 
@@ -131,6 +134,7 @@ export function useChat(mode) {
       if (ac.signal.aborted && reply.text) reply.text += '\n\n⏹ 已停止'
       sending.value = false
       controller = null
+      jobId = ''
       cancelAnimationFrame(rafId)
       rafId = 0
       scrollToBottom('smooth')
@@ -141,11 +145,13 @@ export function useChat(mode) {
 
   function stopChat() {
     // 通知后端真实终止任务(杀掉 ffmpeg/ffprobe 进程、停止 graph),再断开流
-    if (jobId) {
+    const id = jobId
+    jobId = ''
+    if (id) {
       fetch(`${API_BASE}/chat/stop`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ job_id: jobId }),
+        body: JSON.stringify({ job_id: id }),
       }).catch(() => {})
     }
     controller?.abort()
