@@ -65,13 +65,23 @@ print('\n--- execute_command (路径重写) ---')
 for f in os.listdir(DOWNLOAD):
     os.remove(os.path.join(DOWNLOAD, f))
 
-# 真正测试路径重写：用 ffmpeg 命令（但 ffmpeg 可能不存在）
-# 检查命令中的输出路径是否被改写
-res = execute_command.invoke({'command': 'ffmpeg -i /tmp/input.mp4 /tmp/output.mp4'})
-if '拒绝执行非 ffmpeg 命令' not in res.get('command_result', ''):
-    # 如果执行了（即使失败），检查命令中是否包含 DOWNLOAD
+# 用真实存在的输入文件（输入源校验现在先于输出重写执行，
+# 所以必须用合法输入，否则会被安全校验拒绝而测不到重写逻辑）
+_rewrite_src = os.path.join(UPLOAD, '_rewrite_src.mp4')
+if not os.path.isfile(_rewrite_src):
+    with open(_rewrite_src, 'wb') as f:
+        f.write(b'not a real video')
+_rewrite_rel = os.path.relpath(_rewrite_src).replace('\\', '/')
+
+res = execute_command.invoke({'command': f'ffmpeg -i {_rewrite_rel} /tmp/output.mp4'})
+if '拒绝执行' not in res.get('command_result', ''):
     cmd = res.get('command', '')
-    check('输出路径被重写到 DOWNLOAD', DOWNLOAD in cmd)
+    check('输出路径被重写到 DOWNLOAD', DOWNLOAD in cmd, cmd[:160])
+else:
+    check('输出路径重写用例未被安全校验误拒', False,
+          (res.get('command_result') or '')[:160])
+if os.path.isfile(_rewrite_src):
+    os.remove(_rewrite_src)
 
 
 # ── execute_command: 输出路径包含判断（路径语义，非子串匹配） ──

@@ -57,36 +57,49 @@ check('失败命令未被误报成功', '执行成功' not in res_text)
 # ── KeyedLockPool 语义 ──
 print('\n--- KeyedLockPool ---')
 pool = tools.KeyedLockPool(size=8)
-order = []
+events = []          # (阶段, tag, 时刻)
+events_lock = threading.Lock()
 
 
 def worker(tag, keys, hold):
     with pool.acquire(keys):
-        order.append(('enter', tag))
+        with events_lock:
+            events.append(('enter', tag, time.time()))
         time.sleep(hold)
-        order.append(('exit', tag))
+        with events_lock:
+            events.append(('exit', tag, time.time()))
 
 
-# 不同 key 应能并发：两个各持 0.6s 的任务总耗时明显小于 1.2s
-t0 = time.time()
+def max_overlap(evts):
+    """同时处于临界区的最大任务数。"""
+    pts = sorted((t, 1 if kind == 'enter' else -1) for kind, _tag, t in evts)
+    cur = peak = 0
+    for _, delta in pts:
+        cur += delta
+        peak = max(peak, cur)
+    return peak
+
+
+# 不同 key 应能并发：判据是"临界区是否发生重叠"。
+# 原先断言总耗时 < 1.1s，机器负载稍高就假失败（实测偶发 1.20s）。
 ths = [threading.Thread(target=worker, args=(f'A{i}', [f'unique-key-{i}'], 0.6)) for i in range(2)]
 for t in ths:
     t.start()
 for t in ths:
     t.join()
-elapsed = time.time() - t0
-check(f'不同 key 可并发（耗时 {elapsed:.2f}s < 1.1s）', elapsed < 1.1, f'{elapsed:.2f}s')
+check('不同 key 可并发（临界区发生重叠）', max_overlap(events) >= 2,
+      f'峰值重叠={max_overlap(events)}')
 
-# 相同 key 应互斥：两个各持 0.4s 的任务总耗时 >= 0.8s
-order.clear()
-t0 = time.time()
+# 相同 key 应互斥：临界区不得重叠
+events.clear()
 ths = [threading.Thread(target=worker, args=(f'S{i}', ['same-key'], 0.4)) for i in range(2)]
 for t in ths:
     t.start()
 for t in ths:
     t.join()
-elapsed = time.time() - t0
-check(f'相同 key 互斥（耗时 {elapsed:.2f}s >= 0.8s）', elapsed >= 0.8, f'{elapsed:.2f}s')
+check('相同 key 互斥（临界区无重叠）', max_overlap(events) == 1,
+      f'峰值重叠={max_overlap(events)}')
+order = [(k, tag) for k, tag, _ in sorted(events, key=lambda e: e[2])]
 check('相同 key 未重叠（enter/exit 成对出现）',
       order == [('enter', 'S0'), ('exit', 'S0'), ('enter', 'S1'), ('exit', 'S1')]
       or order == [('enter', 'S1'), ('exit', 'S1'), ('enter', 'S0'), ('exit', 'S0')],

@@ -95,6 +95,14 @@ VALUE_OPTS = {
     '-ch_layout', '-channel_layout', '-loglevel', '-progress', '-timelimit', '-duration',
     '-muxpreload', '-muxdelay', '-analyzeduration', '-probesize', '-target', '-vtag', '-atag',
     '-stream_loop', '-loop', '-rtsp_transport', '-user_agent', '-headers',
+    # ── ffprobe 专有 ──
+    # ffprobe 的输入是位置参数，所以这些取值选项若不登记，它们的值
+    # （如 `-show_entries stream=width,height` 的 `stream=width,height`）
+    # 会被当成文件输入而误拒。注意 `-show_format`/`-show_streams`/`-show_packets`
+    # 是**无值**布尔选项，不能放进来。
+    '-v', '-loglevel', '-of', '-print_format', '-show_entries', '-select_streams',
+    '-o', '-read_intervals', '-count_frames', '-count_packets', '-show_data_hash',
+    '-show_program_version', '-show_library_versions', '-show_versions', '-show_error',
 }
 
 
@@ -237,17 +245,206 @@ def _validate_input(value: str) -> bool:
     for base in (os.path.realpath(UPLOAD), os.path.realpath(DOWNLOAD)):
         if real == base or real.startswith(base + os.sep):
             return True
+
+    # 裸文件名（不含目录分隔符）按工作目录解析会落在项目根，从而被误判为越界。
+    # 但提示词明确要求 agent"输出文件只写文件名"，工具又会把输出重写到 DOWNLOAD，
+    # 于是 `ffmpeg -i in.mp4 out.png -i out.png ...` 这类**多步/两遍**命令必然被拒
+    # （典型例子：GIF 调色板两遍法 palettegen + paletteuse）。
+    # 这里对裸文件名再在 UPLOAD / DOWNLOAD 内查找一次，既修好该场景，
+    # 又没有放开任意路径读取。
+    is_bare = bool(v) and os.sep not in v and (not os.altsep or os.altsep not in v)
+    if is_bare:
+        for base in (UPLOAD, DOWNLOAD):
+            base_real = os.path.realpath(base)
+            cand = os.path.join(base, v)
+            if os.path.isfile(cand):
+                real2 = os.path.realpath(cand)
+                if real2.startswith(base_real + os.sep):
+                    return True
     return False
 
 
+# 这些选项**可以不带参数**，其裸值（如 `-v error` 的 `error`）长得像位置参数，
+# 若被当成输入会误判。真正的文件/URL 输入不会长这样。
+_BARE_VALUE_TOKENS = {
+    'quiet', 'panic', 'fatal', 'error', 'warning', 'info', 'verbose', 'debug', 'trace',
+    'json', 'xml', 'ini', 'flat', 'csv', 'compact', 'default', 'null',
+}
+
+
+def _is_stdin_token(val: str) -> bool:
+    """`-` / `pipe:0` / `pipe:1` 等标准流，不是文件路径。"""
+    v = (val or '').strip().lower()
+    return v in ('-', 'pipe:0', 'pipe:1', 'pipe:2', 'pipe:')
+
+
+def _output_candidate_indexes(parts: list, is_ffmpeg: bool) -> set:
+    """只作为"输出"的位置参数下标。
+
+    - ffprobe 不写文件（结果走 stdout），因此**没有**输出位置参数。
+    - ffmpeg 的位置参数：位于最后一个 `-i` 之后的是输出；另外中间产物输出
+      （`-i a -vf palettegen pal.png -i pal.png ...` 里的 `pal.png`）也应以输出对待。
+    """
+    if not is_ffmpeg:
+        return set()
+
+    positional = []
+    consume_next = False
+    for i, p in enumerate(parts):
+        if i == 0:
+            continue
+        if consume_next:
+            consume_next = False
+            continue
+        if p.startswith('-') and not _is_stdin_token(p):
+            if p in VALUE_OPTS:
+                consume_next = True
+            continue
+        positional.append((i, p))
+
+    last_i = max((i for i, p in enumerate(parts) if p == '-i'), default=-1)
+    outputs = {i for i, _ in positional if i > last_i}
+
+    input_values = [parts[i + 1] for i, p in enumerate(parts)
+                    if p == '-i' and i + 1 < len(parts)]
+    for i, tok in positional:
+        if i <= last_i and tok in input_values:
+            outputs.add(i)
+    return outputs
+
+
 def _check_inputs(parts: list) -> list:
-    """返回所有非法输入源列表(空列表表示全部合法)。"""
-    denied = []
+    """返回所有非法输入源列表（空列表表示全部合法）。
+
+    覆盖面（这是安全边界，改动务必谨慎）：
+    - `-i <src>`：ffmpeg 的输入
+    - **普通位置参数**：ffprobe 不用 `-i`，直接把文件/URL 写成位置参数
+      （如 `ffprobe -v error C:/Windows/win.ini`）。此前只检查 `-i`，导致
+      ffprobe 路径上"任意本地文件读取"与 SSRF 都能绕过，属真实漏洞。
+    - 属于输出的位置参数跳过，避免误拒。
+    - 某 token 同时作为输入与输出时视为本命令自产的中间产物，放行
+      （否则 GIF 调色板两遍法这类多步用法会被拒）。
+    """
+    is_ffmpeg = bool(parts) and os.path.basename(str(parts[0])).lower() in ('ffmpeg', 'ffmpeg.exe')
+
+    # 先标记"肯定不是输入"的位置：
+    #   - `-i` 的取值（已按输入校验过，避免重复校验与误判）
+    #   - 输出位置参数（ffmpeg 才会写文件）
+    not_input = set()
     for i, p in enumerate(parts):
         if p == '-i' and i + 1 < len(parts):
-            if not _validate_input(parts[i + 1]):
-                denied.append(parts[i + 1])
-    return denied
+            not_input.add(i + 1)
+    not_input |= _output_candidate_indexes(parts, is_ffmpeg)
+
+    last_i = max((i for i, p in enumerate(parts) if p == '-i'), default=-1)
+
+    candidates = []
+    # 1) `-i` 输入
+    for i, p in enumerate(parts):
+        if p == '-i' and i + 1 < len(parts):
+            candidates.append(parts[i + 1])
+    # 2) 位置参数形式的输入（ffprobe 的主要写法）
+    consume_next = False
+    for i, p in enumerate(parts):
+        if i == 0:
+            continue
+        if consume_next:
+            consume_next = False
+            continue
+        if p.startswith('-') and not _is_stdin_token(p):
+            if p in VALUE_OPTS:
+                consume_next = True
+            continue
+        if i in not_input:
+            continue
+        if p.strip().lower() in _BARE_VALUE_TOKENS:
+            continue                              # 选项裸值（-v error / -of json）
+        if p.startswith(('-', 'pipe:')):
+            continue
+        if is_ffmpeg and i < last_i:
+            continue                              # 最后一个输入之前的位置参数不是输入
+        candidates.append(p)
+
+    denied = []
+    for val in candidates:
+        if _is_stdin_token(val):
+            continue
+        if not _validate_input(val):
+            denied.append(val)
+    seen, out = set(), []
+    for d in denied:
+        if d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def _resolve_bare_inputs(parts: list) -> bool:
+    """把裸文件名形式的**输入**解析成 UPLOAD/DOWNLOAD 里的真实路径。
+
+    为什么必须做：校验阶段允许"裸文件名且存在于 UPLOAD/DOWNLOAD"，但 **ffmpeg/ffprobe
+    是相对进程工作目录（仓库根）解析裸文件名的**，那里并没有这个文件。于是出现
+    "校验通过、执行却报 No such file"的割裂——典型场景是 GIF 调色板两遍法第二遍
+    用 `-i palette.png` 引用上一步的产物。
+
+    覆盖两种写法：
+    - `-i palette.png`（ffmpeg 的输入）
+    - `ffprobe -v error palette.png`（ffprobe 的位置参数输入）
+
+    只处理裸文件名（不含路径分隔符）且确实存在于两目录之一的情况；同时属于输出
+    位置的 token 跳过，避免把输出目标改写掉。
+    """
+    positional_idx = []
+    consume_next = False
+    for i, p in enumerate(parts):
+        if i == 0:
+            continue
+        if consume_next:
+            consume_next = False
+            continue
+        if p.startswith('-') and not _is_stdin_token(p):
+            if p in VALUE_OPTS:
+                consume_next = True
+            continue
+        positional_idx.append(i)
+
+    output_idx = set(find_output_indexes(parts))
+    targets = []
+    for i, p in enumerate(parts):
+        if p == '-i' and i + 1 < len(parts):
+            targets.append(i + 1)
+    for i in positional_idx:
+        if i not in output_idx:
+            targets.append(i)
+
+    changed = False
+    for ti in targets:
+        val = parts[ti]
+        if not val or os.sep in val or (os.altsep and os.altsep in val):
+            continue
+        for base in (UPLOAD, DOWNLOAD):
+            cand = os.path.join(base, val)
+            if os.path.isfile(cand):
+                parts[ti] = cand
+                changed = True
+                break
+    return changed
+
+
+def _denied_input_message(denied: list) -> str:
+    """区分两种被拒原因，给出能照着做的提示。
+
+    原先一律说"请只使用 get_files 返回的文件"，但用户已在左侧把输出文件加入工作区时
+    该提示就自相矛盾了——那种情况用户已经选过了，只是没被识别为输入。
+    """
+    names = '、'.join(denied)
+    in_download = [d for d in denied if os.path.isfile(os.path.join(DOWNLOAD, os.path.basename(d)))]
+    if in_download:
+        return (f'拒绝执行：输入源 {names} 位于输出目录但**不在本次任务选择的文件里**。'
+                f'请在左侧"已完成文件"列表点 ＋ 把它加入工作区后重试；'
+                f'不要直接引用未选择的文件。')
+    return ('拒绝执行：输入源不在允许目录内或使用了被禁止的网络协议：'
+            + names + '。请只使用 get_files 返回的文件。')
 
 
 def _fmt_time(seconds: float) -> str:
@@ -401,7 +598,8 @@ def execute_command(command: str, config: RunnableConfig):
     logger.info(f'原始命令：{command}')
 
     # 安全校验：只允许以 ffmpeg 开头的命令
-    cmd_name = split_command(command)[0]
+    parts = split_command(command)
+    cmd_name = parts[0] if parts else ''
     if cmd_name != 'ffmpeg':
         logger.info(f'拒绝执行非 ffmpeg 命令：{cmd_name}')
         return {
@@ -409,8 +607,17 @@ def execute_command(command: str, config: RunnableConfig):
             'command_result': f'拒绝执行非 ffmpeg 命令：{cmd_name}。请直接使用 ffmpeg 命令完成任务。',
         }
 
+    # 输入源安全校验必须在**输出路径重写之前**做：
+    # 重写会把 `out.png` 变成 `backend\download\out.png`，于是"某 token 既是 -i 输入
+    # 又是本命令输出（中间产物）"就无法再按原样匹配，多步/两遍命令会被误拒。
+    denied = _check_inputs(parts)
+    if denied:
+        return {
+            'command': command,
+            'command_result': _denied_input_message(denied),
+        }
+
     # 将输出路径强制重写到 DOWNLOAD 目录(按参数语法解析,支持多输出)
-    parts = split_command(command)
     output_indexes = find_output_indexes(parts)
     if output_indexes:
         rewritten = False
@@ -428,6 +635,13 @@ def execute_command(command: str, config: RunnableConfig):
             command = subprocess.list2cmdline(parts)
             logger.info(f'输出路径已重写至 {DOWNLOAD}/')
 
+    # 裸文件名输入（如两遍法的 `-i palette.png`）解析成真实路径：
+    # 输出重写之后做，这样"上一步的产物"一定能被找到；
+    # 中间产物若已被重写成绝对路径，此处不会再动它。
+    if _resolve_bare_inputs(parts):
+        command = subprocess.list2cmdline(parts)
+        logger.info('输入路径已补全为实际位置')
+
     logger.info(f'执行命令：{command}')
     os.makedirs(DOWNLOAD, exist_ok=True)
 
@@ -441,14 +655,7 @@ def execute_command(command: str, config: RunnableConfig):
     with _output_locks.acquire(lock_keys), _ffmpeg_slot(stop_event):
         try:
             run_parts = split_command(command)
-            # 输入源安全校验：只允许 UPLOAD/DOWNLOAD 内的文件或 lavfi 虚拟源
-            denied = _check_inputs(run_parts)
-            if denied:
-                return {
-                    'command': command,
-                    'command_result': '拒绝执行：输入源不在允许目录内或使用了被禁止的网络协议：'
-                                     + '、'.join(denied) + '。请只使用 get_files 返回的文件。',
-                }
+            # （输入源安全校验已在重写输出路径之前完成，见上方注释）
             # 注入 -y 静默覆盖同名输出,替代"每次清空下载目录"的粗暴做法(输出文件可跨任务保留)
             if '-y' not in run_parts and '-n' not in run_parts:
                 run_parts.insert(1, '-y')
@@ -527,7 +734,8 @@ def execute_probe_command(command: str, config: RunnableConfig):
     logger.info(f'原始命令：{command}')
 
     # 安全校验：只允许以 ffprobe 开头的命令
-    cmd_name = split_command(command)[0]
+    parts = split_command(command)
+    cmd_name = parts[0] if parts else ''
     if cmd_name != 'ffprobe':
         logger.info(f'拒绝执行非 ffprobe 命令：{cmd_name}')
         return {
@@ -535,20 +743,25 @@ def execute_probe_command(command: str, config: RunnableConfig):
             'command_result': f'拒绝执行非 ffprobe 命令：{cmd_name}。请直接使用 ffprobe 命令完成任务。',
         }
 
+    # 输入源安全校验：ffprobe 不用 `-i`，输入是位置参数，_check_inputs 已覆盖该形式。
+    # 这一步曾漏掉 ffprobe 的位置参数，使任意本地文件读取与 SSRF 都能绕过。
+    denied = _check_inputs(parts)
+    if denied:
+        return {
+            'command': command,
+            'command_result': _denied_input_message(denied),
+        }
+    # 裸文件名输入补全为真实路径（ffprobe 同样相对工作目录解析）
+    if _resolve_bare_inputs(parts):
+        command = subprocess.list2cmdline(parts)
+        logger.info('输入路径已补全为实际位置')
+
     conf = ((config or {}).get('configurable') or {})
     stop_event = conf.get('stop_event')
     proc_box = conf.get('proc')
 
     try:
-        run_parts = split_command(command)
-        # 输入源安全校验(与 ffmpeg 相同)：防 SSRF 与任意文件读取
-        denied = _check_inputs(run_parts)
-        if denied:
-            return {
-                'command': command,
-                'command_result': '拒绝执行：输入源不在允许目录内或使用了被禁止的网络协议：'
-                                 + '、'.join(denied) + '。请只使用 get_files 返回的文件。',
-            }
+        run_parts = list(parts)
         run_parts[0] = ffmpeg_bin('ffprobe')
         returncode, stdout, stderr = _run_binary(run_parts, PROBE_TIMEOUT, 'ffprobe', stop_event, proc_box)
         output = stdout.strip()
