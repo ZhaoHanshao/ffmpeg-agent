@@ -66,6 +66,9 @@ try:
 except ValueError:
     EXEC_TIMEOUT = 1800
 
+# 等待子进程的时间切片（秒）。既决定完成检测延迟，也决定停止/超时的响应粒度。
+_WAIT_SLICE = 0.03
+
 # ffprobe 是只读分析，正常应在秒级返回；沿用 1800s 会让"卡住的探测"把分析功能
 # 挂起半小时，因此单独给一个短得多的默认超时。
 try:
@@ -496,7 +499,16 @@ def _run_binary(run_parts: list, timeout: int, label: str, stop_event=None, proc
         try:
             deadline = time.monotonic() + timeout
             last_pos = 0
-            while proc.poll() is None:
+            # 用 proc.wait(timeout=SLICE) 而不是 "poll + sleep(0.2)"：
+            # 后者即使任务只用几十毫秒，也要整整多等一个 200ms 周期才被发现。
+            # 实测 79ms 的命令经此函数变成 215ms（多耗 135ms），而它每次执行都会走这里。
+            # 切片取 30ms：停止响应与进度刷新依然足够及时，完成延迟降到 ~0。
+            while True:
+                try:
+                    proc.wait(timeout=_WAIT_SLICE)
+                    break                      # 进程已结束
+                except subprocess.TimeoutExpired:
+                    pass
                 if stop_event is not None and stop_event.is_set():
                     proc.kill()
                     proc.wait()
@@ -514,7 +526,6 @@ def _run_binary(run_parts: list, timeout: int, label: str, stop_event=None, proc
                         fout.seek(last_pos)
                         progress_cb(fout.read(end - last_pos).decode(errors='replace'))
                         last_pos = end
-                time.sleep(0.2)
             fout.seek(0)
             ferr.seek(0)
             return proc.returncode, fout.read().decode(errors='replace'), ferr.read().decode(errors='replace')
