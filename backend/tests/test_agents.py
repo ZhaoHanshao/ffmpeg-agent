@@ -57,7 +57,11 @@ print('\n--- 工具调用限制 ---')
 check('_search_tool_limit 是 ToolCallLimitMiddleware',
       isinstance(_search_tool_limit, ToolCallLimitMiddleware))
 check('search 工具限制为 get_command', _search_tool_limit.tool_name == 'get_command')
-check('search 工具 run_limit 为 5', _search_tool_limit.run_limit == 5)
+# 检索只允许一次 + exit_behavior='end'：避免模型在被拦后反复重试
+check('search 工具 run_limit 为 1', _search_tool_limit.run_limit == 1,
+      str(_search_tool_limit.run_limit))
+check('search 超限时直接结束（exit_behavior=end）',
+      _search_tool_limit.exit_behavior == 'end', str(_search_tool_limit.exit_behavior))
 
 
 # ── 执行工具调用限制中间件 ──
@@ -89,7 +93,11 @@ print('\n--- ffprobe 工具调用限制 ---')
 check('_probe_search_tool_limit 是 ToolCallLimitMiddleware',
       isinstance(_probe_search_tool_limit, ToolCallLimitMiddleware))
 check('probe search 工具限制为 get_probe_command', _probe_search_tool_limit.tool_name == 'get_probe_command')
-check('probe search 工具 run_limit 为 5', _probe_search_tool_limit.run_limit == 5)
+check('probe search 工具 run_limit 为 1', _probe_search_tool_limit.run_limit == 1,
+      str(_probe_search_tool_limit.run_limit))
+check('probe search 超限时直接结束（exit_behavior=end）',
+      _probe_search_tool_limit.exit_behavior == 'end',
+      str(_probe_search_tool_limit.exit_behavior))
 
 
 # ── ensure_probe_agents ──

@@ -47,6 +47,22 @@ def _check_cancelled(state: state):
         raise GraphCancelled('任务已被用户停止')
 
 
+def _media_brief(state: dict) -> str:
+    """给检索 agent 的"手上有什么素材"简报。
+
+    检索只调用一次，因此提前告知素材情况（文件名/类型 + 多模态分析结论）
+    能让它一次就检索到相关命令，而不是靠多轮试探。
+    """
+    lines = []
+    files = state.get('files') or []
+    if files:
+        lines.append('待处理文件：' + '、'.join(os.path.basename(f) for f in files))
+    analysis = (state.get('media_analysis') or '').strip()
+    if analysis:
+        lines.append(analysis)
+    return '\n'.join(lines)
+
+
 def _as_text(content) -> str:
     """把消息内容统一成字符串。
 
@@ -133,6 +149,14 @@ def _make_search_node(spec: GraphSpec):
         if state.get('context'):
             context_msgs = [HumanMessage(
                 content=f'对话历史（仅供参考，请结合当前问题理解用户意图）：\n{state["context"]}')]
+
+        # 素材简报：检索只会调用**一次**，所以要把"手上是什么文件"提前告诉检索 agent，
+        # 让它一次就合成覆盖面足够的英文检索式（否则单次检索命中率会明显下降）。
+        brief = _media_brief(state)
+        if brief:
+            context_msgs.append(HumanMessage(
+                content=f'本次要处理的素材（用于决定检索重点）：\n{brief}'))
+
         if state['command'] is not None:
             res = spec.agent('search').invoke(
                 {'messages': [*context_msgs, *mes, HumanMessage(content=state.get('command_result', ''))]})

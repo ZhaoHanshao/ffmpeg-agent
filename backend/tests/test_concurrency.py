@@ -56,7 +56,25 @@ check('失败命令未被误报成功', '执行成功' not in res_text)
 
 # ── KeyedLockPool 语义 ──
 print('\n--- KeyedLockPool ---')
-pool = tools.KeyedLockPool(size=8)
+# 用生产条带数（64），并显式挑出落到不同条带的两个 key。
+# 原因：锁池是固定条带分片，不同 key 有 1/条带数 的概率落到同一把锁，
+# 那时本来就不该并发。条带数设小（如 8）+ 名字固定，会变成约 1/6 概率的假失败
+# （实测复现过）。这里先算出各自条带、挑一组不冲突的，测试才稳定。
+pool = tools.KeyedLockPool()
+
+
+def stripe(key):
+    return hash(key) % len(pool._locks)
+
+
+_distinct = None
+for i in range(200):
+    cand = [f'unique-key-{i}', f'unique-key-{i + 1}']
+    if stripe(cand[0]) != stripe(cand[1]):
+        _distinct = cand
+        break
+assert _distinct, '找不到落在不同条带的 key（不应发生）'
+
 events = []          # (阶段, tag, 时刻)
 events_lock = threading.Lock()
 
@@ -82,7 +100,9 @@ def max_overlap(evts):
 
 # 不同 key 应能并发：判据是"临界区是否发生重叠"。
 # 原先断言总耗时 < 1.1s，机器负载稍高就假失败（实测偶发 1.20s）。
-ths = [threading.Thread(target=worker, args=(f'A{i}', [f'unique-key-{i}'], 0.6)) for i in range(2)]
+print(f'  （并发用例使用不同条带的 key：{_distinct} -> '
+      f'条带 {[stripe(k) for k in _distinct]}）')
+ths = [threading.Thread(target=worker, args=(f'A{i}', [_distinct[i]], 0.6)) for i in range(2)]
 for t in ths:
     t.start()
 for t in ths:

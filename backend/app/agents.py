@@ -13,20 +13,34 @@ from langchain.agents.middleware import ToolCallLimitMiddleware
 from app.tools import get_command, get_files, execute_command, get_probe_command, execute_probe_command
 from langchain.messages import SystemMessage
 
-# 检索工具单次任务内的调用次数上限 / 执行工具只允许一次
-SEARCH_TOOL_LIMIT = 5
+# 检索/执行工具在**单次 agent 调用内**的允许次数。
+#
+# 都设为 1：一次调用只查一次知识库、只执行一次命令。
+# 关键点是必须配 exit_behavior='end'——只设 run_limit 而不结束循环时，
+# 模型会反复重试被拦下的工具，一路撞到 GraphRecursionError（实测 1 次限制下
+# 模型往返高达 4999 次）。exit_behavior='end' 会在超限那一步直接结束 agent，
+# 实测工具执行 1 次、模型往返 2 次。
+SEARCH_TOOL_LIMIT = 1
 EXECUTE_TOOL_LIMIT = 1
 
 
 # ── 提示词 ──
 
 _search_prompt = (
-    '你是一个 FFmpeg 知识库查询助手。'
-    '你的任务是根据用户的 FFmpeg 相关问题，使用 get_command 工具查询知识库，知识库为英文知识库，用英文进行查询，'
-    '获取相关的 FFmpeg 命令和文档片段，然后将查询结果整理后返回。'
-    '只需要返回查询到的 FFmpeg 命令和参数解释，不要添加额外说明。'
-    '必须原样保留检索结果中出现的命令与参数拼写，不要凭记忆补全或改写选项名；'
-    '若检索结果里没有能直接回答问题的内容，就明确说明未检索到，不要编造命令。'
+    '你是一个 FFmpeg 知识库查询助手，只为**一次**检索调用做准备。\n\n'
+    '工作方式（必须遵守）：\n'
+    '1. 先在心里拆解用户需求，把「要做什么 + 涉及哪些参数 + 常见坑」合成**一条**'
+    '覆盖面最广的英文检索式，然后**只调用一次** get_command。\n'
+    '   例：用户说"把视频压小一点"，检索式应同时覆盖 scale / crf / preset / bitrate，'
+    '而不是只查 "compress video"。\n'
+    '2. 知识库是英文的，检索式用英文；不要用中文查询。\n'
+    '3. 工具返回后**立即给出结论**，不要再调用工具，也不要追问。\n\n'
+    '输出要求（供下游据此写 ffmpeg 命令，务必简洁）：\n'
+    '- 直接列出可用的 ffmpeg 命令与关键参数，参数取值照抄检索结果；\n'
+    '- 只保留与当前需求相关的 3~6 条要点，不要罗列无关章节；\n'
+    '- **原样保留检索结果中的选项拼写**，不要凭记忆补全或改写选项名；\n'
+    '- 检索结果里没有对应内容时，明确写「未检索到」，不要编造命令。\n'
+    '不要输出寒暄、解释或额外说明。'
 )
 
 _execute_prompt = (
@@ -34,7 +48,8 @@ _execute_prompt = (
     '生成并执行正确的 ffmpeg 命令。\n\n'
     '规则：\n'
     '1. 只能调用 execute_command 执行以 ffmpeg 开头的命令\n'
-    '2. 先用 get_files 查看可用的输入文件\n'
+    '2. **每轮只调用一个工具**：先调用 get_files 拿真实路径；在拿到它的返回之前，'
+    '不要在同一轮里同时调用 execute_command\n'
     '3. 输入文件路径用 get_files 返回的实际路径\n'
     '4. 只处理 get_files 返回的文件，不要处理其他文件\n'
     '5. 输出文件只写文件名（如 output.webp），工具会自动重定向到输出目录\n'
@@ -46,7 +61,6 @@ _execute_prompt = (
     '10. 如果 ffmpeg 执行失败：分析失败原因；仅当原因明确且有把握修正时（如参数拼写、路径、格式兼容问题），'
     '基于错误信息修正后重试一次；否则直接结束并返回失败原因，不要盲目反复重试。'
 )
-
 _chat_prompt = (
     '你是一个 FFmpeg 助手。你的任务是根据用户的原始问题、知识库检索结果和执行结果，'
     '给用户一个完整、简洁的回答。\n\n'
@@ -61,12 +75,20 @@ _chat_prompt = (
 )
 
 _probe_search_prompt = (
-    '你是一个 FFprobe 知识库查询助手。'
-    '你的任务是根据用户的 FFprobe 相关问题，使用 get_probe_command 工具查询知识库，知识库为英文知识库，用英文进行查询，'
-    '获取相关的 FFprobe 命令和文档片段，然后将查询结果整理后返回。'
-    '只需要返回查询到的 FFprobe 命令和参数解释，不要添加额外说明。'
-    '必须原样保留检索结果中出现的命令与参数拼写，不要凭记忆补全或改写选项名；'
-    '若检索结果里没有能直接回答问题的内容，就明确说明未检索到，不要编造命令。'
+    '你是一个 FFprobe 知识库查询助手，只为**一次**检索调用做准备。\n\n'
+    '工作方式（必须遵守）：\n'
+    '1. 先把用户需求拆解成「要查看哪些字段 + 对应 ffprobe 参数 + 常见坑」，'
+    '合成**一条**覆盖面最广的英文检索式，然后**只调用一次** get_probe_command。\n'
+    '   例：用户说"看看这个视频什么情况"，检索式应同时覆盖 show_format / show_streams / '
+    'codec / bit_rate / duration，而不是只查 "video info"。\n'
+    '2. 知识库是英文的，检索式用英文；不要用中文查询。\n'
+    '3. 工具返回后**立即给出结论**，不要再调用工具，也不要追问。\n\n'
+    '输出要求（供下游据此写 ffprobe 命令，务必简洁）：\n'
+    '- 直接列出可用的 ffprobe 命令与关键参数，参数取值照抄检索结果；\n'
+    '- 只保留与当前需求相关的 3~6 条要点，不要罗列无关章节；\n'
+    '- **原样保留检索结果中的选项拼写**，不要凭记忆补全或改写选项名；\n'
+    '- 检索结果里没有对应内容时，明确写「未检索到」，不要编造命令。\n'
+    '不要输出寒暄、解释或额外说明。'
 )
 
 _probe_execute_prompt = (
@@ -74,7 +96,8 @@ _probe_execute_prompt = (
     '生成并执行正确的 ffprobe 命令。\n\n'
     '规则：\n'
     '1. 只能调用 execute_probe_command 执行以 ffprobe 开头的命令\n'
-    '2. 先用 get_files 查看可用的输入文件\n'
+    '2. **每轮只调用一个工具**：先调用 get_files 拿真实路径；在拿到它的返回之前，'
+    '不要在同一轮里同时调用 execute_probe_command\n'
     '3. 输入文件路径用 get_files 返回的实际路径\n'
     '4. 只处理 get_files 返回的文件，不要处理其他文件\n'
     '5. ffprobe 是只读分析工具，输出打印到终端即可，不要添加输出文件参数\n'
@@ -101,29 +124,40 @@ _probe_chat_prompt = (
 
 
 # ── 工具调用上限中间件 ──
-
+#
+# 全部使用 exit_behavior='end'：超限即结束该 agent，不再让模型重复试错。
+# 注意这与 exit_behavior='continue'（默认）差别很大——后者只拦工具、放模型继续，
+# 模型会一次次重试直到撞上 GraphRecursionError（实测限制 1 次时模型往返 4999 次）。
+#
+# 代价：exit_behavior='end' 要求"超限那一轮不能同时调用别的工具"（否则中间件会抛
+# NotImplementedError）。因此这里对 count 设 1，配合提示词里
+# "先 get_files 拿到路径、再调 execute_command"的顺序要求，确保每轮只有一个工具调用。
 _search_tool_limit = ToolCallLimitMiddleware(
     tool_name="get_command",
     run_limit=SEARCH_TOOL_LIMIT,
     thread_limit=SEARCH_TOOL_LIMIT,
+    exit_behavior="end",
 )
 
 _execute_tool_limit = ToolCallLimitMiddleware(
     tool_name="execute_command",
     run_limit=EXECUTE_TOOL_LIMIT,
     thread_limit=EXECUTE_TOOL_LIMIT,
+    exit_behavior="end",
 )
 
 _probe_search_tool_limit = ToolCallLimitMiddleware(
     tool_name="get_probe_command",
     run_limit=SEARCH_TOOL_LIMIT,
     thread_limit=SEARCH_TOOL_LIMIT,
+    exit_behavior="end",
 )
 
 _probe_execute_tool_limit = ToolCallLimitMiddleware(
     tool_name="execute_probe_command",
     run_limit=EXECUTE_TOOL_LIMIT,
     thread_limit=EXECUTE_TOOL_LIMIT,
+    exit_behavior="end",
 )
 
 
