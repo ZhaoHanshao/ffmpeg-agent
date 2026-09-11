@@ -14,6 +14,8 @@ backend/upload/*
 docker-deploy-guide.md
 api-contract.md
 api-contract.pdf
+# ffmpeg 两遍编码的 pass 日志写在进程工作目录（仓库根），不是 DOWNLOAD
+ffmpeg2pass-*.log*
 /ffmpeg/
 /release/build/
 /release/dist/
