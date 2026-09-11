@@ -346,14 +346,36 @@ def _friendly_error(e: Exception) -> str:
     return f'知识库查询或命令执行失败：{text[:400]}'
 
 
-async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job=None):
-    """公共 SSE 流：job → graph 进度 → meta → chat 逐 token → done"""
+async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job=None, prep_fn=None):
+    """公共 SSE 流：job → (素材理解) → graph 进度 → meta → chat 逐 token → done
+
+    prep_fn(status_list) 可选：在图谱之前运行的准备步骤（多模态素材分析），
+    返回值会注入图谱状态，供执行 agent 决定参数。
+    """
     stop_event = job['stop'] if job else None
     job_id = job['job_id'] if job else ''
     progress = []
     graph_task = None
     try:
         yield f"data: {json.dumps({'event': 'job', 'job_id': job_id})}\n\n"
+
+        # 多模态素材理解：先看图/波形再写参数。放在图谱之前，
+        # 并把进展作为 status 推给前端（这一段会调用模型，耗时 1~5 秒）。
+        media_analysis = ''
+        if prep_fn is not None:
+            prep_status = []
+            yield f"data: {json.dumps({'event': 'status', 'text': '正在理解素材画面...'})}\n\n"
+            prep_task = asyncio.create_task(asyncio.to_thread(prep_fn, prep_status))
+            while not prep_task.done():
+                while prep_status:
+                    yield f"data: {json.dumps({'event': 'status', 'text': prep_status.pop(0)})}\n\n"
+                await asyncio.sleep(0.2)
+            try:
+                media_analysis = await prep_task or ''
+            except Exception as e:  # noqa: BLE001 - 分析失败不应阻断问答
+                logger.warning(f'素材分析失败（继续执行）：{e}')
+            while prep_status:
+                yield f"data: {json.dumps({'event': 'status', 'text': prep_status.pop(0)})}\n\n"
 
         graph_task = asyncio.create_task(
             asyncio.to_thread(graph_fn, question, progress)
@@ -464,20 +486,45 @@ def _chat_response(question, files, history, *, kind, graph_fn, ensure_fn, promp
 
     selected = _sanitize_selected_files(files)
 
+    # 用户直接写出的 ffmpeg 参数（如「-crf 18」）必须原样保留，不被模型改写
+    explicit = extract_explicit_params(question)
+
     logger.info(f'处理{kind}对话')
     logger.info(f'用户问题：{question[:200]}')
     logger.info(f'选择文件：{selected}')
+    if explicit:
+        logger.info(f'用户显式参数：{explicit}')
 
     context = _build_context(history)
     job_id, job = _register_job(kind)
+
+    # 素材分析在主线程之外完成，但结果要注入图谱状态：
+    # 用一个可变容器把 prep 的产出交给 graph_fn（graph_fn 在另一个线程里被调用）。
+    analysis_box = {}
+
+    def _prep(status_list):
+        from app.media import analyze_files
+        status_list.append('正在读取素材信息...')
+        text = analyze_files(selected, question)
+        analysis_box['text'] = text
+        if text:
+            status_list.append('已完成素材分析，开始生成命令...')
+        return text
+
+    def _run_graph(q, p):
+        return graph_fn(q, p, files=selected, context=context,
+                        stop_event=job['stop'], proc_box=job['proc'],
+                        media_analysis=analysis_box.get('text', ''),
+                        explicit_params=explicit)
+
     return StreamingResponse(
         _event_stream(
             question,
-            lambda q, p: graph_fn(q, p, files=selected, context=context,
-                                  stop_event=job['stop'], proc_box=job['proc']),
+            _run_graph,
             get_chat_agent(kind),
             prompt_builder,
             job={'job_id': job_id, **job},
+            prep_fn=_prep if selected else None,
         ),
         media_type="text/event-stream",
     )
@@ -642,6 +689,8 @@ from fastapi.staticfiles import StaticFiles
 
 # ── LLM 设置 ──
 from app.model import get_model_config, update_model_config
+# 用户显式写出的 ffmpeg 参数（如 -crf 18）需要原样保留，不被模型改写
+from app.media import extract_explicit_params
 
 
 @app.get("/api/settings/llm")

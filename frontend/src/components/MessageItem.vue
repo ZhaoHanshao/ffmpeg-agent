@@ -54,7 +54,11 @@ function onMsgClick(e) {
           <span v-if="f.src === 'output'" class="msg-file-tag">输出</span>
         </span>
       </div>
-      <div class="msg-text" v-html="rendered" @click="onMsgClick" />
+      <div v-if="msg.stage" class="msg-stage">
+        <span class="stage-spinner" aria-hidden="true" />
+        <span class="stage-text">{{ msg.stage }}</span>
+      </div>
+      <div v-if="msg.text" class="msg-text" v-html="rendered" @click="onMsgClick" />
       <div v-if="msg.outputFile" class="output-area">
         <img
           v-if="isImage(msg.outputFile) && !previewFailed"
@@ -132,7 +136,26 @@ function onMsgClick(e) {
 }
 
 .msg-text { white-space: normal; }
-.msg-text :deep(p) { margin: 0 0 8px; }
+/* 阶段提示（"正在理解素材画面…"）：与回答正文分开显示，不污染最终内容 */
+.msg-stage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--dsh-fs-base);
+  color: var(--dsh-text-3);
+  padding: 2px 0;
+}
+.stage-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--dsh-border);
+  border-top-color: var(--dsh-brand);
+  border-radius: 50%;
+  animation: msg-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes msg-spin { to { transform: rotate(360deg); } }
+.stage-text { line-height: 1.4; }.msg-text :deep(p) { margin: 0 0 8px; }
 .msg-text :deep(p:last-child) { margin-bottom: 0; }
 .msg-text :deep(h1), .msg-text :deep(h2), .msg-text :deep(h3), .msg-text :deep(h4) {
   font-size: var(--dsh-fs-lg);

@@ -33,6 +33,10 @@ class state(MessagesState):
     progress: list = None
     files: list = None
     context: str = ''
+    # 多模态素材分析结论（画面/波形 + 参数建议），注入执行提示词
+    media_analysis: str = ''
+    # 用户显式写出的 ffmpeg 参数，必须原样保留
+    explicit_params: list = None
     stop_event: object = None
     proc_box: object = None
 
@@ -163,6 +167,16 @@ def _make_execute_node(spec: GraphSpec):
             f'用户问题：{user_question}\n\n'
             f'知识库检索结果：{state.get("result", "")}'
         )
+        # 多模态素材分析（画面/波形 + 参数建议）——让执行 agent 看得见素材，
+        # 而不是只凭用户文字描述猜参数。
+        if state.get('media_analysis'):
+            execute_prompt += f'\n\n素材分析（由多模态模型根据实际画面/波形得出，请据此确定参数）：\n{state["media_analysis"]}'
+        # 用户直接写出的参数必须原样使用，不允许被"优化"掉
+        if state.get('explicit_params'):
+            execute_prompt += (
+                '\n\n用户显式指定的参数（**必须原样出现在命令中，不得更改取值或省略**）：'
+                + ' '.join(state['explicit_params'])
+            )
         if state.get('context'):
             execute_prompt += f'\n\n对话历史（仅供参考）：\n{state["context"]}'
 
@@ -235,7 +249,7 @@ def _build_graph(spec: GraphSpec):
 
 
 def _run_graph(spec: GraphSpec, question: str, progress=None, files=None, context='',
-               stop_event=None, proc_box=None) -> dict:
+               stop_event=None, proc_box=None, media_analysis='', explicit_params=None) -> dict:
     spec.log(f'开始执行，用户问题：{question}')
     return spec.compiled.invoke({
         "messages": [HumanMessage(content=question)],
@@ -250,6 +264,8 @@ def _run_graph(spec: GraphSpec, question: str, progress=None, files=None, contex
         "progress": progress,
         "files": files or [],
         "context": context or '',
+        "media_analysis": media_analysis or '',
+        "explicit_params": explicit_params or [],
         "stop_event": stop_event,
         "proc_box": proc_box,
     })
@@ -264,6 +280,10 @@ def _build_chat_prompt(state: dict, include_output_file: bool = True) -> str:
     )
     if state.get('context'):
         prompt += f'\n对话历史（仅供参考）：\n{state["context"]}'
+    if state.get('media_analysis'):
+        prompt += f'\n素材分析（多模态结论，可在回答里引用）：\n{state["media_analysis"]}'
+    if state.get('explicit_params'):
+        prompt += f'\n用户显式指定的参数：{" ".join(state["explicit_params"])}'
     if state.get('command'):
         prompt += f'\n执行的命令：{state["command"]}'
     if state.get('command_result'):
@@ -305,13 +325,17 @@ PROBE_GRAPH.compiled = _build_graph(PROBE_GRAPH)
 # ── 公开入口（保持既有签名）──
 
 def exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
-               stop_event=None, proc_box=None) -> dict:
-    return _run_graph(FFMPEG_GRAPH, question, progress, files, context, stop_event, proc_box)
+               stop_event=None, proc_box=None, media_analysis: str = '',
+               explicit_params: list = None) -> dict:
+    return _run_graph(FFMPEG_GRAPH, question, progress, files, context, stop_event, proc_box,
+                      media_analysis, explicit_params)
 
 
 def probe_exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
-                     stop_event=None, proc_box=None) -> dict:
-    return _run_graph(PROBE_GRAPH, question, progress, files, context, stop_event, proc_box)
+                     stop_event=None, proc_box=None, media_analysis: str = '',
+                     explicit_params: list = None) -> dict:
+    return _run_graph(PROBE_GRAPH, question, progress, files, context, stop_event, proc_box,
+                      media_analysis, explicit_params)
 
 
 def build_chat_prompt(state: dict) -> str:
