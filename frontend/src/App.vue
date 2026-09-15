@@ -245,56 +245,60 @@ onUnmounted(() => {
 
       <!-- ===== 右栏：对话界面 ===== -->
       <main class="right-panel">
-        <div ref="chatContainer" class="chat-messages" role="log" aria-label="对话记录" @scroll="onChatScroll">
-          <div v-if="!messages.length" class="empty-chat">
-            <div class="empty-icon">{{ mode === 'ffprobe' ? '🔍' : '💬' }}</div>
-            <p class="empty-title">{{ mode === 'ffprobe' ? '想查看这个文件的哪些信息？' : '想对这个文件做什么？' }}</p>
-            <p class="empty-hint">
-              在左侧点击 <b>＋</b> 把文件加入工作区，再用自然语言描述需求；
-              不选文件也可以直接提问 FFmpeg / FFprobe 知识。
-            </p>
-            <p class="examples">
-              <template v-if="mode === 'ffprobe'">
-                <button class="example-chip" @click="useExample('查看视频的分辨率和编码')">
-                  查看视频的分辨率和编码<span class="chip-arrow">→</span>
-                </button>
-                <button class="example-chip" @click="useExample('查看音频采样率')">
-                  查看音频采样率<span class="chip-arrow">→</span>
-                </button>
-                <button class="example-chip" @click="useExample('列出所有流的详细信息')">
-                  列出所有流的详细信息<span class="chip-arrow">→</span>
-                </button>
-              </template>
-              <template v-else>
-                <button class="example-chip" @click="useExample('把图片反色')">
-                  把图片反色<span class="chip-arrow">→</span>
-                </button>
-                <button class="example-chip" @click="useExample('转成 mp4')">
-                  转成 mp4<span class="chip-arrow">→</span>
-                </button>
-                <button class="example-chip" @click="useExample('裁剪中间 10 秒')">
-                  裁剪中间 10 秒<span class="chip-arrow">→</span>
-                </button>
-                <button class="example-chip" @click="useExample('提取音频为 mp3')">
-                  提取音频为 mp3<span class="chip-arrow">→</span>
-                </button>
-                <button class="example-chip" @click="useExample('缩放到 1280x720')">
-                  缩放到 1280x720<span class="chip-arrow">→</span>
-                </button>
-              </template>
-            </p>
+        <!-- chat-area 把"回到最新"锚定在对话视口内：锚到右栏会在出现
+             已选文件栏时压住它（底栏高度会变） -->
+        <div class="chat-area">
+          <div ref="chatContainer" class="chat-messages" role="log" aria-label="对话记录" @scroll="onChatScroll">
+            <div v-if="!messages.length" class="empty-chat">
+              <div class="empty-icon">{{ mode === 'ffprobe' ? '🔍' : '💬' }}</div>
+              <p class="empty-title">{{ mode === 'ffprobe' ? '想查看这个文件的哪些信息？' : '想对这个文件做什么？' }}</p>
+              <p class="empty-hint">
+                在左侧点击 <b>＋</b> 把文件加入工作区，再用自然语言描述需求；
+                不选文件也可以直接提问 FFmpeg / FFprobe 知识。
+              </p>
+              <p class="examples">
+                <template v-if="mode === 'ffprobe'">
+                  <button class="example-chip" @click="useExample('查看视频的分辨率和编码')">
+                    查看视频的分辨率和编码<span class="chip-arrow">→</span>
+                  </button>
+                  <button class="example-chip" @click="useExample('查看音频采样率')">
+                    查看音频采样率<span class="chip-arrow">→</span>
+                  </button>
+                  <button class="example-chip" @click="useExample('列出所有流的详细信息')">
+                    列出所有流的详细信息<span class="chip-arrow">→</span>
+                  </button>
+                </template>
+                <template v-else>
+                  <button class="example-chip" @click="useExample('把图片反色')">
+                    把图片反色<span class="chip-arrow">→</span>
+                  </button>
+                  <button class="example-chip" @click="useExample('转成 mp4')">
+                    转成 mp4<span class="chip-arrow">→</span>
+                  </button>
+                  <button class="example-chip" @click="useExample('裁剪中间 10 秒')">
+                    裁剪中间 10 秒<span class="chip-arrow">→</span>
+                  </button>
+                  <button class="example-chip" @click="useExample('提取音频为 mp3')">
+                    提取音频为 mp3<span class="chip-arrow">→</span>
+                  </button>
+                  <button class="example-chip" @click="useExample('缩放到 1280x720')">
+                    缩放到 1280x720<span class="chip-arrow">→</span>
+                  </button>
+                </template>
+              </p>
+            </div>
+
+            <MessageItem v-for="(msg, i) in messages" :key="i" :msg="msg" />
           </div>
 
-          <MessageItem v-for="(msg, i) in messages" :key="i" :msg="msg" />
+          <!-- 用户往上翻看历史时，新内容仍在流入：给一个明确的"回到最新"入口 -->
+          <button
+            v-if="messages.length && !autoScroll"
+            class="jump-btn"
+            type="button"
+            @click="scrollToBottom('smooth')"
+          >↓ 回到最新</button>
         </div>
-
-        <!-- 用户往上翻看历史时，新内容仍在流入：给一个明确的"回到最新"入口 -->
-        <button
-          v-if="messages.length && !autoScroll"
-          class="jump-btn"
-          type="button"
-          @click="scrollToBottom('smooth')"
-        >↓ 回到最新</button>
 
         <!-- ── 选中文件栏 + 输入栏 ── -->
         <SelectedFilesBar
@@ -469,6 +473,15 @@ button { font-family: inherit; }
   flex-direction: column;
   overflow: hidden;
   min-width: 0;
+}
+
+/* 对话视口：包裹消息区 + 浮层按钮，让按钮的定位基准不受底栏高度影响 */
+.chat-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
   position: relative;
 }
 
@@ -497,7 +510,7 @@ button { font-family: inherit; }
 .jump-btn {
   position: absolute;
   left: 50%;
-  bottom: 86px;
+  bottom: 14px;
   transform: translateX(-50%);
   z-index: 3;
   display: inline-flex;
