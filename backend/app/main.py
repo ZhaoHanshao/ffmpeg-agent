@@ -510,29 +510,36 @@ def _selected_file_refs(selected: list) -> list:
 
 
 def _resolve_conversation(conversation_id: str):
-    """取对话记录并算出本轮要用的 LLM 配置。
+    """取对话记录并算出本轮要用的**两个角色**的模型配置。
 
-    返回 (record, llm_config, error_message)：
-    - llm_config 为 None 表示用全局配置（对话没有覆盖）
-    - error_message 非空表示对话不存在或覆盖配置非法，调用方应直接 SSE 报错
+    返回 (record, roles, error_message)，roles 形如：
+      {'llm_config': 完整配置|None,      # 文本角色（agent）
+       'vision_config': 完整配置|None,   # 视觉角色（画面分析）
+       'vision_dedicated': bool}         # 画面分析是否用了单独配置的视觉模型
+
+    llm_config 为 None 表示用全局配置（对话没有覆盖）。
+    error_message 非空表示对话不存在或覆盖配置非法，调用方应直接 SSE 报错。
     """
     if not conversation_id:
-        return None, None, ''
+        vcfg, dedicated = merged_vision_config(None)
+        return None, {'llm_config': None, 'vision_config': vcfg, 'vision_dedicated': dedicated}, ''
     record = get_conversation(conversation_id)
     if not record:
-        return None, None, '对话不存在或已被删除，请在左侧重新选择一个对话'
-    override = record.get('llm')
+        return None, {}, '对话不存在或已被删除，请在左侧重新选择一个对话'
+    override = record.get('llm') or None
     if not override:
         # 没有覆盖也要把全局配置的"快照"带上吗？不带：全局配置改了（如换了模型）
         # 本对话应该立刻跟着变，这才是"继承"的语义。
-        return record, None, ''
+        vcfg, dedicated = merged_vision_config(None)
+        return record, {'llm_config': None, 'vision_config': vcfg, 'vision_dedicated': dedicated}, ''
     try:
         cfg = merged_config(override)
+        vcfg, dedicated = merged_vision_config(override)
     except ValueError as e:
-        return record, None, f'本对话的模型配置无效：{e}'
+        return record, {}, f'本对话的模型配置无效：{e}'
     if not is_config_configured(cfg):
-        return record, None, '本对话的模型配置不完整，请补全模型名称/接口地址/API Key'
-    return record, cfg, ''
+        return record, {}, '本对话的模型配置不完整，请补全模型名称/接口地址/API Key'
+    return record, {'llm_config': cfg, 'vision_config': vcfg, 'vision_dedicated': dedicated}, ''
 
 
 def _chat_response(question, files, history, *, kind, graph_fn, prompt_builder, spec,
@@ -541,9 +548,10 @@ def _chat_response(question, files, history, *, kind, graph_fn, prompt_builder, 
     if _init_state['status'] == 'running':
         return _sse_error('正在初始化知识库（首次运行需下载模型，请稍候）')
 
-    record, llm_config, conv_error = _resolve_conversation(conversation_id)
+    record, roles, conv_error = _resolve_conversation(conversation_id)
     if conv_error:
         return _sse_error(conv_error)
+    llm_config = roles.get('llm_config')
 
     # 带对话级配置时按该配置构建/取用 agent；否则走全局 agent
     if not spec.ensure({'llm_config': llm_config}):
@@ -572,7 +580,11 @@ def _chat_response(question, files, history, *, kind, graph_fn, prompt_builder, 
     def _prep(status_list):
         from app.media import analyze_files
         status_list.append('正在读取素材信息...')
-        text = analyze_files(selected, question)
+        # 画面分析走**视觉角色**的配置：单独配了视觉模型就只用它，
+        # 没配才回退主模型（由 media.py 的能力探测决定是否跳过图片）。
+        text = analyze_files(selected, question,
+                             vision_config=roles.get('vision_config'),
+                             dedicated=roles.get('vision_dedicated', False))
         analysis_box['text'] = text
         if text:
             status_list.append('已完成素材分析，开始生成命令...')
@@ -766,7 +778,7 @@ from fastapi.staticfiles import StaticFiles
 # ── LLM 设置 ──
 from app.model import (
     get_model_config, update_model_config, merged_config, mask_config,
-    is_config_configured, build_model_for,
+    is_config_configured, build_model_for, get_vision_config, merged_vision_config,
 )
 # 用户显式写出的 ffmpeg 参数（如 -crf 18）需要原样保留，不被模型改写
 from app.media import extract_explicit_params
@@ -782,7 +794,8 @@ from app.graph import FFMPEG_GRAPH, PROBE_GRAPH
 async def get_llm_settings():
     # get_model_config() 每次都返回新 dict（api_key 已脱敏），无需再维护一份副本：
     # 旧实现的 _settings_store 只做 update，陈旧字段会一直残留。
-    return get_model_config()
+    # vision 是**独立角色**的视图：separate=False 表示画面分析回退主模型。
+    return {**get_model_config(), 'vision': get_vision_config()}
 
 
 @app.put("/api/settings/llm")
@@ -800,13 +813,22 @@ async def update_llm_settings(body: dict):
         if not check['ok']:
             # 配置已落盘（用户可能就是想先存着），但明确告知校验未通过
             raise HTTPException(status_code=400, detail=check['message'])
-    return cfg
+
+    # 视觉模型单独配了也要探一次：配错的话问题要等到"上传素材"才暴露，
+    # 那时用户根本不会把它和设置联系起来。
+    vision = get_vision_config()
+    if vision.get('separate') and vision.get('configured'):
+        vcheck = await _check_llm_connection(merged_vision_config(None)[0])
+        if not vcheck['ok']:
+            raise HTTPException(status_code=400, detail=f'视觉模型：{vcheck["message"]}')
+
+    return {**cfg, 'vision': vision}
 
 
 # ── 多对话 ──
 
 def _conversation_view(record: dict) -> dict:
-    """给前端的对话详情：消息 + 脱敏后的覆盖配置 + 实际生效配置。"""
+    """给前端的对话详情：消息 + 脱敏后的覆盖配置 + 实际生效配置（两个角色都给）。"""
     out = {
         'id': record['id'],
         'title': record.get('title') or '新对话',
@@ -816,17 +838,32 @@ def _conversation_view(record: dict) -> dict:
         'messages': record.get('messages') or [],
         'llm_override': None,
         'llm_effective': None,
+        'vision_override': None,
+        'vision_effective': None,
     }
     override = record.get('llm')
     if override:
-        view = dict(override)
+        view = {k: v for k, v in override.items() if k != 'vision'}
         if view.get('api_key'):
             view['api_key'] = mask_key(view['api_key'])
-        out['llm_override'] = view
+        out['llm_override'] = view or None
+        vov = override.get('vision')
+        if isinstance(vov, dict):
+            vview = dict(vov)
+            if vview.get('api_key'):
+                vview['api_key'] = mask_key(vview['api_key'])
+            out['vision_override'] = vview
     try:
         out['llm_effective'] = mask_config(merged_config(override))
     except ValueError as e:
         out['llm_effective'] = {'configured': False, 'error': str(e)}
+    try:
+        vcfg, vded = merged_vision_config(override)
+        out['vision_effective'] = {**mask_config(vcfg),
+                                   'separate': vded,
+                                   'source': 'vision' if vded else 'text'}
+    except ValueError as e:
+        out['vision_effective'] = {'configured': False, 'error': str(e)}
     return out
 
 
@@ -875,6 +912,7 @@ async def update_conversation_route(cid: str, body: dict):
             # 先按合并后的结果校验：temperature 越界、base_url 非法等在这里拦下
             try:
                 effective = merged_config(override)
+                veffective, _vded = merged_vision_config(override)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             if not set_llm_override(cid, override):
@@ -884,6 +922,12 @@ async def update_conversation_route(cid: str, body: dict):
                 check = await _check_llm_connection(effective)
                 if not check['ok']:
                     raise HTTPException(status_code=400, detail=check['message'])
+            # 视觉角色单独配了也要探一次：否则配错要等到上传素材才暴露
+            vov = override.get('vision') if isinstance(override.get('vision'), dict) else None
+            if vov and any(k in vov for k in ('model', 'base_url', 'api_key')):
+                vcheck = await _check_llm_connection(veffective)
+                if not vcheck['ok']:
+                    raise HTTPException(status_code=400, detail=f'视觉模型：{vcheck["message"]}')
         else:
             if not set_llm_override(cid, None):
                 raise HTTPException(status_code=404, detail='对话不存在')

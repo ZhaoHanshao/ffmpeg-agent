@@ -115,7 +115,7 @@ print('\n--- analyze_files（打桩 LLM）---')
 calls = {'n': 0, 'had_image': False}
 
 
-def fake_call(messages):
+def fake_call(messages, cfg=None):
     calls['n'] += 1
     content = messages[0].content
     if isinstance(content, list):
@@ -126,23 +126,23 @@ def fake_call(messages):
 
 
 orig_call = media._call_llm
-orig_flag = media._vision_supported
 media._cache.clear()
 
 # 路径 A：模型支持视觉 -> 应带上图像
 media._call_llm = fake_call
-media._vision_supported = None
+media._vision_support.clear()
 calls.update(n=0, had_image=False)
 out = media.analyze_files([video], '压缩一下')
 check('视觉可用时结果非空', bool(out), repr(out[:80]))
 check('视觉可用时确实传了图像', calls['had_image'])
 check('结果包含技术指标前缀', '素材：' in out, out[:80])
+check('结果标明是谁看的画面（回退主模型）', '主模型' in out, out[:80])
 
 # 路径 B：模型拒绝图像 -> 自动降级且不再重试
 media._cache.clear()
 
 
-def fake_call_reject(messages):
+def fake_call_reject(messages, cfg=None):
     calls['n'] += 1
     content = messages[0].content
     if isinstance(content, list):
@@ -151,16 +151,17 @@ def fake_call_reject(messages):
 
 
 media._call_llm = fake_call_reject
-media._vision_supported = None
+media._vision_support.clear()
 out2 = media.analyze_files([video], '压缩一下')
 check('图像被拒时自动降级为纯文本', bool(out2), repr(out2[:80]))
-check('降级后标记视觉不可用', media._vision_supported is False)
+check('降级后按模型标记视觉不可用', media._vision_support.get('global') is False)
 
 # 再调一次：已知不支持视觉，不应再尝试带图
 calls['n'] = 0
 media._cache.clear()
 out3 = media.analyze_files([video], '再压缩')
 check('已知不支持视觉时不再尝试带图', calls['n'] == 1, f'调用次数={calls["n"]}')
+check('降级结论里点明是哪个模型不收图', '纯文本' in out3 or '画面' in out3, out3[:80])
 
 # 缓存：同文件重复分析应命中缓存
 calls['n'] = 0
@@ -169,7 +170,7 @@ check('相同文件命中缓存（不再调用 LLM）', calls['n'] == 0, f'调�
 
 # 恢复
 media._call_llm = orig_call
-media._vision_supported = orig_flag
+media._vision_support.clear()
 media._cache.clear()
 
 # 不存在的文件

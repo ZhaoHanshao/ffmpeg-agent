@@ -33,12 +33,18 @@ JPEG_QUALITY = 4          # ffmpeg -q:v，2(最好)~31(最差)
 MAX_VIDEO_FRAMES = 3      # 抽帧数量上限
 MAX_ANALYSIS_CHARS = 800  # 注入提示词的结论长度上限
 
-# 进程内缓存：同一文件重复分析没有意义（按 路径+mtime+大小 命中）
+# 进程内缓存：同一文件 + 同一视觉模型重复分析没有意义。
+# **缓存键必须带上模型名**：切换视觉模型后旧结论就作废了，否则用户换了模型
+# 却still拿到上一个模型的分析结果，看起来像"切换没生效"。
 _cache: dict = {}
 
-# 视觉能力探测结果：None=未知，True/False=已确认。
-# 一旦某次调用因图像被拒，后续直接跳过图像，不再浪费一次往返。
-_vision_supported = None
+# 图像能力探测：**按模型指纹分别记**。
+# 曾经是一个全局的 _vision_supported —— 只要有一个不支持图像的模型被拒过一次，
+# 之后所有对话都不再尝试画面分析，哪怕换成了真正的视觉模型。这正是"混用出错"。
+_vision_support: dict = {}
+
+# 模型实例缓存（指纹 → ChatOpenAI），避免每次分析都重建客户端
+_model_cache: dict = {}
 
 
 def _probe_json(path: str) -> dict:
@@ -161,10 +167,28 @@ _ANALYSIS_PROMPT = (
 )
 
 
-def _call_llm(messages: list) -> str:
-    """调用当前配置的模型；返回文本，失败抛异常。"""
-    from app.model import get_model
-    m = get_model()
+def _resolve_model(cfg: dict):
+    """按配置取模型实例（带指纹缓存）；cfg 为空时用全局主模型。"""
+    from app.model import build_model_for, config_fingerprint, get_model
+    if not cfg:
+        return get_model()
+    fp = config_fingerprint(cfg)
+    m = _model_cache.get(fp)
+    if m is None:
+        m = build_model_for(cfg)
+        if m is None:
+            return None
+        _model_cache[fp] = m
+    return m
+
+
+def _call_llm(messages: list, cfg: dict = None) -> str:
+    """调用**视觉角色**的模型；返回文本，失败抛异常。
+
+    这里刻意不接受"当前对话的文本模型"——图像只送给视觉模型，
+    文本链路（写命令/写回答）也永远不碰图像，两个角色不互相借用。
+    """
+    m = _resolve_model(cfg)
     if m is None:
         raise RuntimeError('LLM 未配置')
     res = m.invoke(messages)
@@ -184,21 +208,30 @@ def _is_image_rejected(exc: Exception) -> bool:
     return any(k in text for k in keys)
 
 
-def analyze_files(files: list, question: str = '') -> str:
+def analyze_files(files: list, question: str = '', vision_config: dict = None,
+                  dedicated: bool = False) -> str:
     """分析素材并返回可注入提示词的结论文本；无可用素材时返回空串。
 
-    - 只分析第一个文件（多文件会让视觉调用成倍变慢，而用户需求通常围绕主素材）
-    - 视觉调用失败（模型不支持图像）时自动降级为纯文本分析并缓存该结论
-    """
-    global _vision_supported
+    vision_config 由 `model.merged_vision_config()` 解析好后传进来：
+    - dedicated=True 表示这是**单独配置的视觉模型**，画面只送给它；
+    - dedicated=False 表示没配视觉模型、回退到主模型，由能力探测决定
+      要不要跳过图片（结论里会明确标注，免得下游以为"已经看过画面"）。
 
+    - 只分析第一个文件（多文件会让视觉调用成倍变慢，而用户需求通常围绕主素材）
+    - 视觉调用失败（模型不支持图像）时自动降级为纯文本分析，并按模型缓存该结论
+    """
     files = [f for f in (files or []) if f and os.path.isfile(f)]
     if not files:
         return ''
     path = files[0]
+
+    from app.model import config_fingerprint
+    model_key = config_fingerprint(vision_config) if vision_config else 'global'
+    model_name = (vision_config or {}).get('model') or '主模型'
+
     try:
         st = os.stat(path)
-        cache_key = (os.path.abspath(path), int(st.st_mtime), st.st_size)
+        cache_key = (os.path.abspath(path), int(st.st_mtime), st.st_size, model_key)
     except OSError:
         return ''
     if cache_key in _cache:
@@ -210,12 +243,14 @@ def analyze_files(files: list, question: str = '') -> str:
 
     text_prompt = _ANALYSIS_PROMPT.format(meta=meta, question=question or '（未说明）')
     result = ''
+    # 该模型是否已确认不收图像（按模型分别记，互不影响）
+    known_unsupported = _vision_support.get(model_key) is False
 
     tmpdir = tempfile.mkdtemp(prefix='dsh-media-')
     try:
         vision_attempted = False
         images = []
-        if _vision_supported is not False:
+        if not known_unsupported:
             images = _extract_images(path, ext, tmpdir)
         if images:
             vision_attempted = True
@@ -223,21 +258,24 @@ def analyze_files(files: list, question: str = '') -> str:
             content += [_image_content(p) for p in images]
             try:
                 from langchain.messages import HumanMessage
-                result = _call_llm([HumanMessage(content=content)])
-                _vision_supported = True
-                logger.info(f'多模态分析完成（{len(images)} 张图）')
+                result = _call_llm([HumanMessage(content=content)], vision_config)
+                _vision_support[model_key] = True
+                logger.info(f'画面分析完成（{len(images)} 张图，模型 {model_name}）')
             except Exception as e:  # noqa: BLE001
                 if _is_image_rejected(e):
-                    logger.warning(f'当前模型不支持图像输入，降级为纯文本分析：{e}')
-                    _vision_supported = False
+                    logger.warning(f'模型 {model_name} 不接受图像输入，降级为纯文本分析：{e}')
+                    _vision_support[model_key] = False
                 else:
-                    logger.warning(f'多模态分析失败，降级：{e}')
+                    logger.warning(f'画面分析失败，降级：{e}')
         if not result:
             from langchain.messages import HumanMessage
-            result = _call_llm([HumanMessage(content=text_prompt)])
+            result = _call_llm([HumanMessage(content=text_prompt)], vision_config)
             # 明确标注这次是纯文本结论，避免下游误以为"已经看过画面"
             if not vision_attempted:
-                reason = '模型不支持图像输入' if _vision_supported is False else '未能抽取画面'
+                if known_unsupported or _vision_support.get(model_key) is False:
+                    reason = f'模型 {model_name} 不支持图像输入'
+                else:
+                    reason = '未能抽取画面'
                 result = f'（未使用画面分析：{reason}）\n{result}'
     except Exception as e:  # noqa: BLE001
         logger.warning(f'素材分析失败：{e}')
@@ -256,7 +294,9 @@ def analyze_files(files: list, question: str = '') -> str:
     if not result:
         return ''
     result = result.strip()[:MAX_ANALYSIS_CHARS]
-    header = f'素材：{os.path.basename(path)}（{meta}）'
+    # 在头部标明"谁看的画面"，出问题时一眼能看出是哪个角色在干活
+    role = f'视觉模型 {model_name}' if dedicated else f'主模型 {model_name}（未单独配置视觉模型）'
+    header = f'素材：{os.path.basename(path)}（{meta}）｜画面分析：{role}'
     out = f'{header}\n{result}'
     _cache[cache_key] = out
     return out

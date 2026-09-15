@@ -17,6 +17,18 @@ SETTINGS_FILE = os.getenv('SETTINGS_FILE', 'backend/data/llm_settings.json')
 # 只有这些字段归设置文件管；SETTINGS_FILE 路径本身仍可用环境变量覆盖。
 LLM_CONFIG_FIELDS = ('model', 'base_url', 'api_key', 'temperature', 'max_tokens')
 
+# ── 两个角色，刻意分开 ──
+#
+# text  ：图谱里的 search / execute / chat agent —— 只处理文字（写命令、写回答）
+# vision：素材画面/波形理解 —— 只处理图像
+#
+# 为什么不合成"一个模型兼顾"：
+#   - 文本模型常常不收图像，喂图会直接报错或静默降级，画面信息全丢；
+#   - 视觉模型未必更会写 ffmpeg 命令，让它在整条链路上跑会拉低命令质量、也更慢更贵。
+# 所以两个角色的配置各自独立解析，**图像永远只送给 vision，命令永远只送给 text**。
+TEXT_ROLE = 'text'
+VISION_ROLE = 'vision'
+
 _DEFAULT_CONFIG = {
     'model': None,
     'base_url': None,
@@ -28,6 +40,11 @@ _DEFAULT_CONFIG = {
 
 _model_config = dict(_DEFAULT_CONFIG)
 
+# 视觉角色的**覆盖层**：只存用户显式填写的字段，其余在解析时从主模型继承
+# （同一个服务商换个模型是最常见的用法，不该逼用户把 base_url/key 再抄一遍）。
+# None 表示没启用独立视觉模型 → 图像分析回退到主模型。
+_vision_config = None
+
 # RLock:get_model_config 持锁期间还会调用 is_configured,可重入避免死锁
 _config_lock = threading.RLock()
 _model = None
@@ -35,6 +52,7 @@ _model = None
 
 def _load_settings_file():
     """启动时从磁盘恢复上次保存的配置（LLM 配置的唯一来源）。"""
+    global _vision_config
     try:
         if os.path.isfile(SETTINGS_FILE):
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
@@ -42,17 +60,27 @@ def _load_settings_file():
             for k in LLM_CONFIG_FIELDS:
                 if k in data and data[k] is not None:
                     _model_config[k] = data[k]
-            logger.info(f'已从 {SETTINGS_FILE} 恢复 LLM 配置')
+            v = data.get('vision')
+            if isinstance(v, dict):
+                kept = {k: v[k] for k in LLM_CONFIG_FIELDS
+                        if v.get(k) is not None and not (isinstance(v[k], str) and not v[k].strip())}
+                _vision_config = kept or None
+            logger.info(f'已从 {SETTINGS_FILE} 恢复 LLM 配置'
+                        f'（视觉模型：{"已单独配置" if _vision_config else "跟随主模型"}）')
         else:
             logger.info(f'未找到 {SETTINGS_FILE}，LLM 未配置（可在页面右上角 ⚙️ 中填写）')
     except (OSError, ValueError) as e:
         logger.warning(f'读取配置文件 {SETTINGS_FILE} 失败,使用默认配置: {e}')
 
 
-def _save_settings_file(cfg: dict):
+def _save_settings_file(cfg: dict, vision: dict = None):
     try:
         os.makedirs(os.path.dirname(os.path.abspath(SETTINGS_FILE)), exist_ok=True)
         payload = {k: cfg.get(k) for k in LLM_CONFIG_FIELDS}
+        # vision 为 None 时显式写 null：这是"回退主模型"的标记，
+        # 不能省略这个键，否则旧文件里的视觉配置会被静默保留。
+        payload['vision'] = ({k: vision.get(k) for k in LLM_CONFIG_FIELDS}
+                             if vision else None)
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
     except OSError as e:
@@ -147,7 +175,7 @@ def rebuild_agents():
 
 
 def update_model_config(new_config: dict):
-    global _model_config
+    global _model_config, _vision_config
     with _config_lock:
         cfg = copy.deepcopy(_model_config)
         for k in LLM_CONFIG_FIELDS:
@@ -162,10 +190,44 @@ def update_model_config(new_config: dict):
                 cfg['api_key'] = incoming
         cfg = _validate(cfg)
         _model_config = cfg
+
+        # 视觉层：只有显式传了 'vision' 才动它。三种写法语义不同，刻意区分开：
+        #   {'vision': null} / {} / 全空值        → 清除覆盖，画面分析回到跟随主模型
+        #   {'vision': {'temperature': 0.9}}      → **没提模型**：增量改，保住已存的模型名
+        #   {'vision': {'model': '   ', ...}}     → **明确把模型清空了**：同样清除覆盖
+        # 区分"没提"和"清空"是必要的：前者是只想调个参数，后者是用户真的要把
+        # 独立视觉模型关掉；把后者当成前者会让界面上的清空操作"自己变回去"。
+        if 'vision' in new_config:
+            v = new_config.get('vision')
+            if not isinstance(v, dict):
+                _vision_config = None
+            else:
+                kept = {}
+                for k in LLM_CONFIG_FIELDS:
+                    val = v.get(k)
+                    if val is None:
+                        continue
+                    if isinstance(val, str) and not val.strip():
+                        continue
+                    kept[k] = val
+                model_cleared = ('model' in v) and not str(v.get('model') or '').strip()
+                if model_cleared or (not kept and 'model' not in v):
+                    _vision_config = None
+                else:
+                    # 没提 model → 在旧层上增量；提了非空 model → 整体替换
+                    base = copy.deepcopy(_vision_config) if ('model' not in v and _vision_config) else {}
+                    merged_layer = {**base, **kept}
+                    if merged_layer.get('model'):
+                        _validate({**cfg, **merged_layer})  # 逐字段校验（越界/非法 URL）
+                        _vision_config = merged_layer
+                    else:
+                        # 并完之后仍然没有模型名 → 这个覆盖层没有意义，按未分离处理，
+                        # 避免出现"标记为已分离、实际还在用主模型"的错位状态
+                        _vision_config = None
         _build_model_locked()
     # 锁外重建 agents(避免与 is_configured 死锁/长持锁)
     rebuild_agents()
-    _save_settings_file(cfg)
+    _save_settings_file(cfg, _vision_config)
 
 
 def get_model_config() -> dict:
@@ -216,7 +278,7 @@ def mask_config(cfg: dict) -> dict:
 
 
 def merged_config(override) -> dict:
-    """把对话级覆盖合并到全局配置上，返回一份校验过的完整配置。
+    """把对话级覆盖合并到全局主模型配置上，返回一份校验过的完整配置。
 
     override 为 None/空 → 直接就是全局配置（"继承"）。
     api_key 的语义与 update_model_config 一致：留空或回显脱敏值时视为继承全局，
@@ -226,10 +288,18 @@ def merged_config(override) -> dict:
         base = copy.deepcopy(_model_config)
     if not isinstance(override, dict):
         return base
+    return _apply_override(base, override)
+
+
+def _apply_override(base: dict, override: dict) -> dict:
+    """把 override 的非空字段盖到 base 上并校验。
+
+    "空值算继承"的规则集中在这里：对话级覆盖和视觉覆盖用的是同一套语义。
+    """
     cfg = dict(base)
     for k in LLM_CONFIG_FIELDS:
         if k == 'api_key':
-            continue
+            continue  # 下面单独处理（脱敏占位符不能覆盖真实 key）
         v = override.get(k)
         if v is None:
             continue
@@ -241,6 +311,63 @@ def merged_config(override) -> dict:
         if incoming and incoming != mask_key(base.get('api_key') or '') and incoming != (base.get('api_key') or ''):
             cfg['api_key'] = incoming
     return _validate(cfg)
+
+
+def vision_separate() -> bool:
+    """是否单独配置了视觉模型（false = 画面分析回退主模型）。"""
+    with _config_lock:
+        return _vision_config is not None
+
+
+def merged_vision_config(override=None):
+    """解析**图像分析**要用的完整配置。返回 (config, used_dedicated)。
+
+    单独配了视觉模型时，以**全局主模型配置**为底、盖上视觉覆盖层：
+    - 用主模型做底是为了让"同一个服务商换个模型"只填一个模型名，base_url/key 自动继承；
+    - 底必须是**全局**配置而不是对话级有效配置 —— 对话级覆盖改的是"这个对话用哪个文本模型、
+      什么温度"，那是文本角色的职责，**不能渗进视觉角色**，否则一次对话级调温就会
+      悄悄改掉画面分析的采样参数，正是要避免的"混用"。
+
+    没单独配视觉模型时，直接回退主模型的有效配置（used_dedicated=False）——
+    这时两个角色本来就是同一个模型，由 media.py 的能力探测决定要不要跳过图片。
+    """
+    conv_vision = None
+    if isinstance(override, dict):
+        v = override.get('vision')
+        if isinstance(v, dict):
+            conv_vision = v
+    with _config_lock:
+        vision_layer = copy.deepcopy(_vision_config)
+        text_global = copy.deepcopy(_model_config)
+    if not vision_layer:
+        return merged_config(override), False
+    layer = dict(vision_layer)
+    if conv_vision:
+        # 对话级视觉覆盖也走同一套"空值算继承"
+        layer = {**layer, **{k: v for k, v in conv_vision.items()
+                             if v is not None and not (isinstance(v, str) and not v.strip())}}
+    return _apply_override(text_global, layer), True
+
+
+def get_vision_config() -> dict:
+    """视觉角色的脱敏视图（给前端展示"画面分析实际会用哪个模型"）。"""
+    with _config_lock:
+        layer = copy.deepcopy(_vision_config)
+        text = copy.deepcopy(_model_config)
+    if not layer:
+        # 回退态：直接展示主模型，并标明来源是回退
+        view = mask_config(text)
+        view.update({'separate': False, 'source': 'text'})
+        return view
+    try:
+        cfg = _apply_override(text, layer)
+    except ValueError as e:
+        view = mask_config({})
+        view.update({'separate': True, 'source': 'vision', 'error': str(e)})
+        return view
+    view = mask_config(cfg)
+    view.update({'separate': True, 'source': 'vision'})
+    return view
 
 
 def config_fingerprint(cfg: dict) -> str:

@@ -112,7 +112,14 @@ const {
   settings,
   convSettings,
   scope,
+  role,
+  isVision,
+  isConversation,
+  activeSettings,
+  visionToggle,
+  visionSummary,
   overrideFields: settingsOverrideFields,
+  visionOverrideFields,
   settingsError,
   loadSettings,
   saveSettings,
@@ -123,14 +130,15 @@ const {
   onClearConversation: () => setOverride(null),
 })
 
-// 弹窗里正在编辑哪一份草稿，取决于作用域
-const activeSettings = computed(() => (scope.value === 'conversation' ? convSettings.value : settings.value))
-
-/** 打开设置弹窗：默认改全局；已打开对话时可以在弹窗内切到"仅本对话"。 */
+/** 打开设置弹窗：默认改全局的主模型；已打开对话时可以在弹窗内切换作用域与角色。 */
 function openSettings() {
   scope.value = 'global'
+  role.value = 'text'
   settingsError.value = ''
-  fillConversationScope(current.value?.llm_effective, current.value?.llm_override)
+  fillConversationScope(
+    current.value?.llm_effective, current.value?.llm_override,
+    current.value?.vision_effective, current.value?.vision_override,
+  )
   showSettings.value = true
 }
 
@@ -139,7 +147,10 @@ function onScopeChange(next) {
   scope.value = next
   settingsError.value = ''
   if (next === 'conversation') {
-    fillConversationScope(current.value?.llm_effective, current.value?.llm_override)
+    fillConversationScope(
+      current.value?.llm_effective, current.value?.llm_override,
+      current.value?.vision_effective, current.value?.vision_override,
+    )
   }
 }
 
@@ -373,12 +384,18 @@ onUnmounted(() => {
       v-model:show="showSettings"
       :settings="activeSettings"
       :scope="scope"
+      :role="role"
+      :vision-enabled="visionToggle"
       :can-use-conversation-scope="!!currentId"
       :override-fields="settingsOverrideFields"
+      :vision-override-fields="visionOverrideFields"
+      :vision-summary="visionSummary"
       :configured="configured"
       :saving="savingSettings"
       :error="settingsError"
       @update:scope="onScopeChange"
+      @update:role="role = $event"
+      @update:vision-enabled="visionToggle = $event"
       @save="saveSettings"
       @clear-override="clearConversationOverride"
     />

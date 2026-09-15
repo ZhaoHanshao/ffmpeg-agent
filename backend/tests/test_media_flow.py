@@ -118,10 +118,10 @@ def run_chat(question, files):
 # ── 打桩 LLM：第一次调用带图，返回分析文本 ──
 llm_calls = {'n': 0, 'had_image': False}
 orig_call = media._call_llm
-orig_vision = media._vision_supported
+orig_vision = dict(media._vision_support)
 
 
-def fake_llm(messages):
+def fake_llm(messages, cfg=None):
     llm_calls['n'] += 1
     content = messages[0].content
     if isinstance(content, list):
@@ -131,7 +131,7 @@ def fake_llm(messages):
 
 
 media._call_llm = fake_llm
-media._vision_supported = None
+media._vision_support.clear()
 
 try:
     # ── 1) 有文件：应触发分析并把结论传给图谱 ──
@@ -186,9 +186,9 @@ try:
 
     # ── 4) 模型不支持图像：应降级为纯文本且不报错 ──
     print('\n--- 模型不支持图像时降级 ---')
-    media._vision_supported = None
+    media._vision_support.clear()
 
-    def reject_images(messages):
+    def reject_images(messages, cfg=None):
         content = messages[0].content
         if isinstance(content, list):
             raise RuntimeError('this model does not support image input')
@@ -203,7 +203,8 @@ try:
     # 该标注只用于一开始就没图可发的情况。
     check('拒绝图像时不误标"未使用画面分析"', '未使用画面分析' not in analysis4, analysis4[:120])
     check('降级后仍带上了技术指标（图片而非视频）', '图片 png' in analysis4, analysis4[:80])
-    check('已记录视觉不可用（后续不再重试）', media._vision_supported is False)
+    check('已记录该模型不收图（后续不再重试）',
+          False in media._vision_support.values(), str(media._vision_support))
 
     # ── 5) 已知不支持视觉时，应标注未使用画面分析 ──
     print('\n--- 已知不支持视觉（避免重复尝试）---')
@@ -214,7 +215,7 @@ try:
           '未使用画面分析' in analysis5, analysis5[:120])
 finally:
     media._call_llm = orig_call
-    media._vision_supported = orig_vision
+    media._vision_support.clear(); media._vision_support.update(orig_vision)
     media._cache.clear()
     if os.path.isfile(src):
         os.remove(src)

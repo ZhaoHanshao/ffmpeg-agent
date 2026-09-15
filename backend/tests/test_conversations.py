@@ -20,6 +20,14 @@ load_dotenv()
 _TMP_DIR = tempfile.mkdtemp(prefix='conv-test-')
 os.environ['CONVERSATIONS_DIR'] = _TMP_DIR
 
+# 同理隔离设置文件：这些测试会走到"对话级模型覆盖"的解析，如果用户机器上
+# 恰好没配 key（或配了别的模型），断言结果就会跟着变。预置一份完整配置保证确定性。
+_SETTINGS = os.path.join(_TMP_DIR, 'llm_settings.json')
+os.environ['SETTINGS_FILE'] = _SETTINGS
+with open(_SETTINGS, 'w', encoding='utf-8') as _f:
+    _f.write('{"model": "base-text-model", "base_url": "https://base.example/v1",'
+             ' "api_key": "sk-base-key", "temperature": 0.2, "max_tokens": 1024}')
+
 import app.conversations as C  # noqa: E402
 import app.model as M  # noqa: E402
 
@@ -125,6 +133,19 @@ try:
     check('空 dict 清除覆盖（恢复继承全局）', C.get_conversation(cid)['llm'] is None)
     C.set_llm_override(cid, None)
     check('None 清除覆盖', C.get_conversation(cid)['llm'] is None)
+
+    # 视觉角色是 llm 下的嵌套层：被这里静默丢掉过一次（前端保存了、读回来却没有）
+    C.set_llm_override(cid, {'model': 'text-m', 'vision': {'model': 'vision-m'}})
+    ov = C.get_conversation(cid)['llm']
+    check('对话级视觉覆盖被完整保存', ov == {'model': 'text-m', 'vision': {'model': 'vision-m'}},
+          str(ov))
+    C.set_llm_override(cid, {'vision': {'model': '   ', 'temperature': 0.5}})
+    check('视觉层没有模型名时不算覆盖', C.get_conversation(cid)['llm'] is None,
+          str(C.get_conversation(cid)['llm']))
+    C.set_llm_override(cid, {'model': 'text-m'})
+    check('只有主模型覆盖时 llm 里不含 vision 键',
+          'vision' not in (C.get_conversation(cid)['llm'] or {}))
+    C.set_llm_override(cid, None)
 
     # ── 覆盖合并到全局配置 ──
     print('--- 配置合并 ---')

@@ -30,6 +30,10 @@ TITLE_MAX_CHARS = 28
 # 对话级可覆盖的 LLM 字段（与 model.LLM_CONFIG_FIELDS 保持一致）
 LLM_OVERRIDE_FIELDS = ('model', 'base_url', 'api_key', 'temperature', 'max_tokens')
 
+# 视觉角色的覆盖挂在 llm 下的这个**嵌套**键上。
+# 漏掉它会让"对话级视觉模型"被静默丢掉——前端明明保存了，读回来却没有。
+VISION_KEY = 'vision'
+
 _lock = threading.RLock()
 # id -> meta（不含 messages）；由 _load_index() 在导入时构建
 _index = {}
@@ -175,23 +179,39 @@ def rename_conversation(cid: str, title: str):
         return record
 
 
+def _clean_layer(src: dict) -> dict:
+    """去掉空值字段；返回的层里只有"用户确实指定了"的字段。"""
+    out = {}
+    for k in LLM_OVERRIDE_FIELDS:
+        v = src.get(k)
+        if v is None:
+            continue
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                continue
+        out[k] = v
+    return out
+
+
 def set_llm_override(cid: str, override):
-    """设置/清除对话级 LLM 覆盖。override 为 None 或空 dict 表示恢复继承全局。"""
+    """设置/清除对话级 LLM 覆盖。override 为 None 或空 dict 表示恢复继承全局。
+
+    override 里可以带一个嵌套的 `vision` 子对象（视觉角色的覆盖）。
+    没有它的话前端保存的"本对话视觉模型"会被这里静默丢掉。
+    """
     with _lock:
         record = _read(cid)
         if not record:
             return None
-        cleaned = {}
+        cleaned = _clean_layer(override) if isinstance(override, dict) else {}
         if isinstance(override, dict):
-            for k in LLM_OVERRIDE_FIELDS:
-                v = override.get(k)
-                if v is None:
-                    continue
-                if isinstance(v, str):
-                    v = v.strip()
-                    if not v:
-                        continue
-                cleaned[k] = v
+            v = override.get(VISION_KEY)
+            if isinstance(v, dict):
+                vlayer = _clean_layer(v)
+                # 视觉层没有模型名就没有意义（与 model.py 的判定一致）
+                if vlayer.get('model'):
+                    cleaned[VISION_KEY] = vlayer
         record['llm'] = cleaned or None
         record['updated_at'] = _now()
         _write(record)

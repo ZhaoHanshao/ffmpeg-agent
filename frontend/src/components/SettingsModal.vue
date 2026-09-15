@@ -3,18 +3,24 @@ import { computed } from 'vue'
 
 const show = defineModel('show', { type: Boolean, default: false })
 const props = defineProps({
-  // 当前作用域下正在编辑的草稿（全局或本对话），由父组件决定绑哪一份
+  // 当前作用域 × 角色下正在编辑的草稿，由父组件决定绑哪一份
   settings: { type: Object, required: true },
   scope: { type: String, default: 'global' },
+  role: { type: String, default: 'text' },
+  // 是否单独配置视觉模型（仅 vision 角色有意义）
+  visionEnabled: { type: Boolean, default: false },
   // 没有打开任何对话时不能选"仅本对话"
   canUseConversationScope: { type: Boolean, default: false },
   // 本对话已覆盖的字段名，用于提示"哪些不再继承全局"
   overrideFields: { type: Array, default: () => [] },
+  visionOverrideFields: { type: Array, default: () => [] },
+  // 一句话说明画面分析当前实际用哪个模型
+  visionSummary: { type: String, default: '' },
   configured: { type: Boolean, default: false },
   saving: { type: Boolean, default: false },
   error: { type: String, default: '' },
 })
-const emit = defineEmits(['save', 'clear-override', 'update:scope'])
+const emit = defineEmits(['save', 'clear-override', 'update:scope', 'update:role', 'update:visionEnabled'])
 
 const FIELD_LABELS = {
   model: '模型',
@@ -25,8 +31,12 @@ const FIELD_LABELS = {
 }
 
 const isConversation = computed(() => props.scope === 'conversation')
+const isVision = computed(() => props.role === 'vision')
 const overriddenText = computed(() =>
   props.overrideFields.map((f) => FIELD_LABELS[f] || f).join('、')
+)
+const visionOverriddenText = computed(() =>
+  props.visionOverrideFields.map((f) => FIELD_LABELS[f] || f).join('、')
 )
 </script>
 
@@ -61,47 +71,113 @@ const overriddenText = computed(() =>
           >仅本对话</button>
         </div>
 
+        <!-- 角色：主模型（写命令/回答） / 视觉模型（看画面/波形）。
+             两个角色分开配置，互不借用——文本模型往往不收图，
+             视觉模型写 ffmpeg 命令又未必更准。 -->
+        <div class="role-switch" role="tablist" aria-label="模型角色">
+          <button
+            class="scope-btn"
+            :class="{ active: !isVision }"
+            role="tab"
+            :aria-selected="!isVision"
+            @click="emit('update:role', 'text')"
+          >主模型<span class="role-sub">写命令 / 回答</span></button>
+          <button
+            class="scope-btn"
+            :class="{ active: isVision }"
+            role="tab"
+            :aria-selected="isVision"
+            @click="emit('update:role', 'vision')"
+          >视觉模型<span class="role-sub">看画面 / 波形</span></button>
+        </div>
+
         <p v-if="!configured" class="settings-hint">请先填写 LLM 模型信息以开始使用</p>
         <p v-if="error" class="settings-error">{{ error }}</p>
 
-        <template v-if="isConversation">
-          <p class="settings-note">
-            只覆盖你想改的字段，其余字段继续跟随全局配置。<b>把某项改回与全局相同即表示不再覆盖它。</b>
-          </p>
-          <p v-if="overrideFields.length" class="settings-note overridden">
-            本对话已覆盖：{{ overriddenText }}
-          </p>
-        </template>
-        <p v-else class="settings-note">配置保存在服务端 <code>backend/data/llm_settings.json</code>，不读取 .env。</p>
+        <!-- ── 主模型 ── -->
+        <template v-if="!isVision">
+          <template v-if="isConversation">
+            <p class="settings-note">
+              只覆盖你想改的字段，其余字段继续跟随全局配置。<b>把某项改回与全局相同即表示不再覆盖它。</b>
+            </p>
+            <p v-if="overrideFields.length" class="settings-note overridden">
+              本对话已覆盖：{{ overriddenText }}
+            </p>
+          </template>
+          <p v-else class="settings-note">配置保存在服务端 <code>backend/data/llm_settings.json</code>，不读取 .env。</p>
 
-        <label class="settings-field">
-          <span>模型名称</span>
-          <input v-model="settings.model" placeholder="如 gpt-4o-mini / deepseek-chat" />
-        </label>
-        <label class="settings-field">
-          <span>接口地址 <span class="field-hint">OpenAI 兼容的 BASE_URL</span></span>
-          <input v-model="settings.base_url" placeholder="如 https://api.openai.com/v1" />
-        </label>
-        <label class="settings-field">
-          <span>API Key <span v-if="isConversation" class="field-hint">留空表示沿用全局</span></span>
-          <input v-model="settings.api_key" type="password" placeholder="sk-..." />
-        </label>
-        <label v-if="!isConversation" class="settings-field">
-          <span>访问令牌 (AUTH_TOKEN, 服务端配置后必填)</span>
-          <input v-model="settings.auth_token" type="password" placeholder="与后端 AUTH_TOKEN 一致,可选" />
-        </label>
-        <label class="settings-field">
-          <span>Temperature (温度)</span>
-          <input v-model.number="settings.temperature" type="number" step="0.1" min="0" max="2" />
-        </label>
-        <label class="settings-field">
-          <span>Max Tokens (最大 token 数)</span>
-          <input v-model.number="settings.max_tokens" type="number" step="1" min="1" />
-        </label>
+          <label class="settings-field">
+            <span>模型名称</span>
+            <input v-model="settings.model" placeholder="如 gpt-4o-mini / deepseek-chat" />
+          </label>
+          <label class="settings-field">
+            <span>接口地址 <span class="field-hint">OpenAI 兼容的 BASE_URL</span></span>
+            <input v-model="settings.base_url" placeholder="如 https://api.openai.com/v1" />
+          </label>
+          <label class="settings-field">
+            <span>API Key <span v-if="isConversation" class="field-hint">留空表示沿用全局</span></span>
+            <input v-model="settings.api_key" type="password" placeholder="sk-..." />
+          </label>
+          <label v-if="!isConversation" class="settings-field">
+            <span>访问令牌 (AUTH_TOKEN, 服务端配置后必填)</span>
+            <input v-model="settings.auth_token" type="password" placeholder="与后端 AUTH_TOKEN 一致,可选" />
+          </label>
+          <label class="settings-field">
+            <span>Temperature (温度)</span>
+            <input v-model.number="settings.temperature" type="number" step="0.1" min="0" max="2" />
+          </label>
+          <label class="settings-field">
+            <span>Max Tokens (最大 token 数)</span>
+            <input v-model.number="settings.max_tokens" type="number" step="1" min="1" />
+          </label>
+        </template>
+
+        <!-- ── 视觉模型 ── -->
+        <template v-else>
+          <label class="vision-toggle">
+            <input
+              type="checkbox"
+              :checked="visionEnabled"
+              @change="emit('update:visionEnabled', $event.target.checked)"
+            />
+            <span>单独配置视觉模型</span>
+          </label>
+          <p class="settings-note">
+            开启后：素材画面/波形<b>只</b>送给这个模型，主模型不再接触图像。
+            关闭则回退主模型（若主模型不支持图像，会自动跳过画面并注明）。
+          </p>
+          <p class="settings-note vision-where">{{ visionSummary }}</p>
+          <p v-if="isConversation && visionOverrideFields.length" class="settings-note overridden">
+            本对话已覆盖视觉模型：{{ visionOverriddenText }}
+          </p>
+
+          <template v-if="visionEnabled">
+            <label class="settings-field">
+              <span>视觉模型名称</span>
+              <input v-model="settings.model" placeholder="如 gpt-4o / qwen-vl-max" />
+            </label>
+            <label class="settings-field">
+              <span>接口地址 <span class="field-hint">留空表示与主模型相同</span></span>
+              <input v-model="settings.base_url" placeholder="留空沿用主模型" />
+            </label>
+            <label class="settings-field">
+              <span>API Key <span class="field-hint">留空沿用主模型</span></span>
+              <input v-model="settings.api_key" type="password" placeholder="留空沿用主模型" />
+            </label>
+            <label class="settings-field">
+              <span>Temperature (温度)</span>
+              <input v-model.number="settings.temperature" type="number" step="0.1" min="0" max="2" />
+            </label>
+            <label class="settings-field">
+              <span>Max Tokens (最大 token 数)</span>
+              <input v-model.number="settings.max_tokens" type="number" step="1" min="1" />
+            </label>
+          </template>
+        </template>
       </div>
       <div class="modal-footer">
         <button
-          v-if="isConversation && overrideFields.length"
+          v-if="isConversation && (overrideFields.length || visionOverrideFields.length)"
           class="btn-cancel btn-clear"
           :disabled="saving"
           @click="emit('clear-override')"
@@ -166,8 +242,8 @@ const overriddenText = computed(() =>
 .modal-close:hover { color: var(--dsh-text-2); }
 .modal-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 13px; }
 
-/* ── 作用域切换 ── */
-.scope-switch {
+/* ── 作用域 / 角色切换 ── */
+.scope-switch, .role-switch {
   display: flex;
   background: var(--dsh-surface-3);
   border-radius: var(--dsh-r-md);
@@ -176,6 +252,10 @@ const overriddenText = computed(() =>
 }
 .scope-btn {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
   background: none;
   border: none;
   border-radius: var(--dsh-r-sm);
@@ -193,7 +273,32 @@ const overriddenText = computed(() =>
   color: var(--dsh-brand);
   box-shadow: var(--dsh-shadow-sm);
 }
+.role-sub {
+  font-size: var(--dsh-fs-xs);
+  font-weight: 400;
+  color: var(--dsh-text-4);
+}
+.scope-btn.active .role-sub { color: var(--dsh-brand-line); }
+
+/* ── 视觉模型开关 ── */
+.vision-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--dsh-fs-md);
+  font-weight: 500;
+  color: var(--dsh-text);
+  cursor: pointer;
+}
+.vision-toggle input { width: 15px; height: 15px; accent-color: var(--dsh-brand); cursor: pointer; }
 .settings-note.overridden { color: var(--dsh-warn); }
+.settings-note.vision-where {
+  color: var(--dsh-brand);
+  background: var(--dsh-brand-soft);
+  border: 1px solid var(--dsh-brand-line);
+  border-radius: var(--dsh-r-sm);
+  padding: 7px 10px;
+}
 .btn-clear { margin-right: auto; }
 .settings-field {
   display: flex;

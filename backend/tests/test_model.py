@@ -1,4 +1,4 @@
-import os, sys
+import os, sys, shutil, tempfile
 
 _backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend not in sys.path:
@@ -7,11 +7,24 @@ if _backend not in sys.path:
 from dotenv import load_dotenv
 load_dotenv()
 
+# **必须在 import app.model 之前**把设置文件指向临时目录：
+# 本测试会调用 update_model_config()，它真的会落盘。虽然测试结尾会把旧配置写回去，
+# 但中途一旦抛异常/被 Ctrl-C，用户的真实配置（含 API Key）就被永久覆盖了。
+# 同时预置一份完整配置，让断言不依赖用户机器上恰好配了什么。
+_TMP_DIR = tempfile.mkdtemp(prefix='model-test-')
+_SETTINGS = os.path.join(_TMP_DIR, 'llm_settings.json')
+os.environ['SETTINGS_FILE'] = _SETTINGS
+with open(_SETTINGS, 'w', encoding='utf-8') as _f:
+    _f.write('{"model": "test-model", "base_url": "https://test.example/v1",'
+             ' "api_key": "sk-test-key", "temperature": 0.2, "max_tokens": 1024}')
+
 from app.model import (
     is_configured, get_model, get_model_config,
     update_model_config, rebuild_agents, _model_config, _model,
     LLM_CONFIG_FIELDS, SETTINGS_FILE,
 )
+
+assert SETTINGS_FILE == os.environ['SETTINGS_FILE'], '设置文件未被隔离，测试会污染真实配置'
 
 pass_count = 0
 fail_count = 0
@@ -148,6 +161,7 @@ except Exception as e:
 
 # ── 恢复原始状态 ──
 update_model_config(old_cfg)
+shutil.rmtree(_TMP_DIR, ignore_errors=True)
 print('\n--- 已恢复原始配置 ---')
 
 
