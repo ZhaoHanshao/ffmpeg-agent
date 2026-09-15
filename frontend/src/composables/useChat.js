@@ -47,7 +47,14 @@ export function useChat(mode) {
     autoScroll.value = true
   }
 
-  async function sendMessage(files = []) {
+  /** 载入某个对话的历史消息（切换对话时由 App.vue 调用）。 */
+  function setMessages(list) {
+    messages.value = list || []
+    autoScroll.value = true
+    nextTick(() => scrollToBottom('auto'))
+  }
+
+  async function sendMessage(files = [], conversationId = '') {
     const text = question.value.trim()
     if (!text || sending.value) return ''
 
@@ -71,6 +78,8 @@ export function useChat(mode) {
     try {
       const form = new FormData()
       form.append('question', text)
+      // 对话 id：后端据此把本轮问答写进该对话的记录，并按该对话的模型覆盖调用 LLM
+      if (conversationId) form.append('conversation_id', conversationId)
       for (const f of files) form.append('files', `${f.src === 'output' ? 'download' : 'upload'}:${f.name}`)
       // 多轮记忆：把最近 6 条历史(不含当前提问与占位回复)随请求发给后端
       const roleName = { user: '用户', ai: '助手', system: '系统' }
@@ -179,6 +188,7 @@ export function useChat(mode) {
     sendMessage,
     stopChat,
     clearMessages,
+    setMessages,
     onChatScroll,
   }
 }

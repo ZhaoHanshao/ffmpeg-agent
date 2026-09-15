@@ -1,12 +1,33 @@
 <script setup>
-const settings = defineModel({ type: Object, required: true })
+import { computed } from 'vue'
+
 const show = defineModel('show', { type: Boolean, default: false })
-defineProps({
+const props = defineProps({
+  // 当前作用域下正在编辑的草稿（全局或本对话），由父组件决定绑哪一份
+  settings: { type: Object, required: true },
+  scope: { type: String, default: 'global' },
+  // 没有打开任何对话时不能选"仅本对话"
+  canUseConversationScope: { type: Boolean, default: false },
+  // 本对话已覆盖的字段名，用于提示"哪些不再继承全局"
+  overrideFields: { type: Array, default: () => [] },
   configured: { type: Boolean, default: false },
   saving: { type: Boolean, default: false },
   error: { type: String, default: '' },
 })
-const emit = defineEmits(['save'])
+const emit = defineEmits(['save', 'clear-override', 'update:scope'])
+
+const FIELD_LABELS = {
+  model: '模型',
+  base_url: '接口地址',
+  api_key: 'API Key',
+  temperature: '温度',
+  max_tokens: '最大 token',
+}
+
+const isConversation = computed(() => props.scope === 'conversation')
+const overriddenText = computed(() =>
+  props.overrideFields.map((f) => FIELD_LABELS[f] || f).join('、')
+)
 </script>
 
 <template>
@@ -22,9 +43,37 @@ const emit = defineEmits(['save'])
         <button v-if="configured" class="modal-close" @click="show = false">&times;</button>
       </div>
       <div class="modal-body">
+        <!-- 作用域：全局默认 / 只改这一个对话 -->
+        <div v-if="canUseConversationScope" class="scope-switch" role="tablist" aria-label="设置作用域">
+          <button
+            class="scope-btn"
+            :class="{ active: !isConversation }"
+            role="tab"
+            :aria-selected="!isConversation"
+            @click="emit('update:scope', 'global')"
+          >全局默认</button>
+          <button
+            class="scope-btn"
+            :class="{ active: isConversation }"
+            role="tab"
+            :aria-selected="isConversation"
+            @click="emit('update:scope', 'conversation')"
+          >仅本对话</button>
+        </div>
+
         <p v-if="!configured" class="settings-hint">请先填写 LLM 模型信息以开始使用</p>
         <p v-if="error" class="settings-error">{{ error }}</p>
-        <p class="settings-note">配置保存在服务端 <code>backend/data/llm_settings.json</code>，不读取 .env。</p>
+
+        <template v-if="isConversation">
+          <p class="settings-note">
+            只覆盖你想改的字段，其余字段继续跟随全局配置。<b>把某项改回与全局相同即表示不再覆盖它。</b>
+          </p>
+          <p v-if="overrideFields.length" class="settings-note overridden">
+            本对话已覆盖：{{ overriddenText }}
+          </p>
+        </template>
+        <p v-else class="settings-note">配置保存在服务端 <code>backend/data/llm_settings.json</code>，不读取 .env。</p>
+
         <label class="settings-field">
           <span>模型名称</span>
           <input v-model="settings.model" placeholder="如 gpt-4o-mini / deepseek-chat" />
@@ -34,10 +83,10 @@ const emit = defineEmits(['save'])
           <input v-model="settings.base_url" placeholder="如 https://api.openai.com/v1" />
         </label>
         <label class="settings-field">
-          <span>API Key</span>
+          <span>API Key <span v-if="isConversation" class="field-hint">留空表示沿用全局</span></span>
           <input v-model="settings.api_key" type="password" placeholder="sk-..." />
         </label>
-        <label class="settings-field">
+        <label v-if="!isConversation" class="settings-field">
           <span>访问令牌 (AUTH_TOKEN, 服务端配置后必填)</span>
           <input v-model="settings.auth_token" type="password" placeholder="与后端 AUTH_TOKEN 一致,可选" />
         </label>
@@ -51,9 +100,15 @@ const emit = defineEmits(['save'])
         </label>
       </div>
       <div class="modal-footer">
+        <button
+          v-if="isConversation && overrideFields.length"
+          class="btn-cancel btn-clear"
+          :disabled="saving"
+          @click="emit('clear-override')"
+        >恢复继承全局</button>
         <button v-if="configured" class="btn-cancel" @click="show = false">取消</button>
         <button class="btn-save" :disabled="saving" @click="emit('save')">
-          {{ saving ? '保存中…' : '保存' }}
+          {{ saving ? '保存中…' : (isConversation ? '保存到本对话' : '保存') }}
         </button>
       </div>
     </div>
@@ -110,6 +165,36 @@ const emit = defineEmits(['save'])
 }
 .modal-close:hover { color: var(--dsh-text-2); }
 .modal-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 13px; }
+
+/* ── 作用域切换 ── */
+.scope-switch {
+  display: flex;
+  background: var(--dsh-surface-3);
+  border-radius: var(--dsh-r-md);
+  padding: 3px;
+  gap: 2px;
+}
+.scope-btn {
+  flex: 1;
+  background: none;
+  border: none;
+  border-radius: var(--dsh-r-sm);
+  padding: 7px 10px;
+  font-size: var(--dsh-fs-base);
+  font-family: inherit;
+  font-weight: 500;
+  color: var(--dsh-text-3);
+  cursor: pointer;
+  transition: color var(--dsh-dur) var(--dsh-ease), background var(--dsh-dur) var(--dsh-ease);
+}
+.scope-btn:hover { color: var(--dsh-text-2); }
+.scope-btn.active {
+  background: var(--dsh-surface);
+  color: var(--dsh-brand);
+  box-shadow: var(--dsh-shadow-sm);
+}
+.settings-note.overridden { color: var(--dsh-warn); }
+.btn-clear { margin-right: auto; }
 .settings-field {
   display: flex;
   flex-direction: column;

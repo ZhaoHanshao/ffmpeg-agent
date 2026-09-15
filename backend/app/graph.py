@@ -39,6 +39,8 @@ class state(MessagesState):
     explicit_params: list = None
     stop_event: object = None
     proc_box: object = None
+    # 对话级 LLM 覆盖（完整配置 dict）。None → 用全局配置构建的 agent
+    llm_config: dict = None
 
 
 def _check_cancelled(state: state):
@@ -90,11 +92,15 @@ def _as_text(content) -> str:
     return str(content)
 
 
+# agents_for() 返回三元组的固定顺序
+_ROLE_INDEX = {'search': 0, 'execute': 1, 'chat': 2}
+
+
 class GraphSpec:
     """一套执行图的声明式定义（ffmpeg / ffprobe 的差异集中在此）。"""
 
     def __init__(self, name, agent_prefix, ensure_attr, search_progress,
-                 execute_progress, log_prefix, capture_output):
+                 execute_progress, log_prefix, capture_output, agent_spec=None):
         self.name = name
         # agent 属性名前缀，如 'agent' → agent_search/agent_execute
         self.agent_prefix = agent_prefix
@@ -105,13 +111,29 @@ class GraphSpec:
         self.log_prefix = log_prefix
         # ffprobe 只读，不产生输出文件
         self.capture_output = capture_output
+        # 对应的 AgentSpec（提示词/工具/中间件都在那边）。
+        # 走全局 agent 时用不到它，但**按对话级配置构建 agent 时必须传它**：
+        # agents_for() 要的是 AgentSpec，把 GraphSpec 自己传过去会直接
+        # AttributeError（两者字段完全不同）。
+        self.agent_spec = agent_spec
         self.compiled = None
 
-    def ensure(self):
+    def ensure(self, state=None):
+        """LLM 是否可用。带 llm_config 的 state 走按配置构建的那条路。"""
+        cfg = (state or {}).get('llm_config')
+        if cfg:
+            return agents_mod.ensure_agents_for(self.agent_spec, cfg)
         return getattr(agents_mod, self.ensure_attr)()
 
-    def agent(self, role: str):
-        """按需取当前 agent 实例（rebuild_agents 后仍能拿到最新对象）。"""
+    def agent(self, role: str, state=None):
+        """按需取当前 agent 实例。
+
+        有对话级配置时从指纹缓存里取（同一配置复用，不每个请求重建）；
+        否则读模块属性，因此 rebuild_agents() 之后拿到的是最新实例。
+        """
+        cfg = (state or {}).get('llm_config')
+        if cfg:
+            return agents_mod.agents_for(self.agent_spec, cfg)[_ROLE_INDEX[role]]
         return getattr(agents_mod, f'{self.agent_prefix}_{role}')
 
     def log(self, msg: str):
@@ -136,7 +158,7 @@ def _make_search_node(spec: GraphSpec):
                 'result': f'已达到最大查询次数（{MAX_SEARCH_COUNT} 次），请基于现有信息继续',
             }
 
-        if not spec.ensure():
+        if not spec.ensure(state):
             raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
 
         spec.log('执行查询')
@@ -158,10 +180,10 @@ def _make_search_node(spec: GraphSpec):
                 content=f'本次要处理的素材（用于决定检索重点）：\n{brief}'))
 
         if state['command'] is not None:
-            res = spec.agent('search').invoke(
+            res = spec.agent('search', state).invoke(
                 {'messages': [*context_msgs, *mes, HumanMessage(content=state.get('command_result', ''))]})
         else:
-            res = spec.agent('search').invoke({'messages': [*context_msgs, *mes]})
+            res = spec.agent('search', state).invoke({'messages': [*context_msgs, *mes]})
         state['result'] = _as_text(res['messages'][-1].content)
         state['search_count'] = state.get('search_count', 0) + 1
         return state
@@ -173,7 +195,7 @@ def _make_execute_node(spec: GraphSpec):
     """构建 execute / probe_execute 节点。"""
 
     def _execute(state: state):
-        if not spec.ensure():
+        if not spec.ensure(state):
             raise RuntimeError('LLM 未配置，请先在设置中填写模型信息')
 
         _check_cancelled(state)
@@ -213,7 +235,7 @@ def _make_execute_node(spec: GraphSpec):
         if spec.capture_output:
             configurable['progress'] = state.get('progress')
 
-        res = spec.agent('execute').invoke(
+        res = spec.agent('execute', state).invoke(
             {'messages': [HumanMessage(content=execute_prompt)]},
             config={'configurable': configurable},
         )
@@ -273,8 +295,11 @@ def _build_graph(spec: GraphSpec):
 
 
 def _run_graph(spec: GraphSpec, question: str, progress=None, files=None, context='',
-               stop_event=None, proc_box=None, media_analysis='', explicit_params=None) -> dict:
+               stop_event=None, proc_box=None, media_analysis='', explicit_params=None,
+               llm_config=None) -> dict:
     spec.log(f'开始执行，用户问题：{question}')
+    if llm_config:
+        spec.log(f'使用对话级模型：{llm_config.get("model")}')
     return spec.compiled.invoke({
         "messages": [HumanMessage(content=question)],
         "command": None,
@@ -292,6 +317,7 @@ def _run_graph(spec: GraphSpec, question: str, progress=None, files=None, contex
         "explicit_params": explicit_params or [],
         "stop_event": stop_event,
         "proc_box": proc_box,
+        "llm_config": llm_config,
     })
 
 
@@ -329,6 +355,7 @@ FFMPEG_GRAPH = GraphSpec(
     execute_progress='正在执行命令...',
     log_prefix='',
     capture_output=True,
+    agent_spec=agents_mod.FFMPEG_SPEC,
 )
 
 PROBE_GRAPH = GraphSpec(
@@ -339,6 +366,7 @@ PROBE_GRAPH = GraphSpec(
     execute_progress='正在执行 ffprobe 命令...',
     log_prefix='ffprobe ',
     capture_output=False,
+    agent_spec=agents_mod.PROBE_SPEC,
 )
 
 # 模块加载时各编译一次,避免每个请求重复 compile()
@@ -350,16 +378,16 @@ PROBE_GRAPH.compiled = _build_graph(PROBE_GRAPH)
 
 def exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
                stop_event=None, proc_box=None, media_analysis: str = '',
-               explicit_params: list = None) -> dict:
+               explicit_params: list = None, llm_config: dict = None) -> dict:
     return _run_graph(FFMPEG_GRAPH, question, progress, files, context, stop_event, proc_box,
-                      media_analysis, explicit_params)
+                      media_analysis, explicit_params, llm_config)
 
 
 def probe_exec_graph(question: str, progress: list = None, files: list = None, context: str = '',
                      stop_event=None, proc_box=None, media_analysis: str = '',
-                     explicit_params: list = None) -> dict:
+                     explicit_params: list = None, llm_config: dict = None) -> dict:
     return _run_graph(PROBE_GRAPH, question, progress, files, context, stop_event, proc_box,
-                      media_analysis, explicit_params)
+                      media_analysis, explicit_params, llm_config)
 
 
 def build_chat_prompt(state: dict) -> str:
@@ -382,18 +410,24 @@ exec_workflow = FFMPEG_GRAPH.compiled
 probe_exec_workflow = PROBE_GRAPH.compiled
 
 
-def chat_agent_for(is_probe: bool):
-    """返回对应变体的 chat agent（供 __main__ 与路由使用）。"""
+def chat_agent_for(is_probe: bool, llm_config: dict = None):
+    """返回对应变体的 chat agent（供 __main__ 与路由使用）。
+
+    llm_config 非空时按对话级配置构建（带指纹缓存）。
+    """
+    spec = PROBE_GRAPH if is_probe else FFMPEG_GRAPH
+    if llm_config:
+        return agents_mod.agents_for(spec, llm_config)[2]
     agents_mod.ensure_probe_agents() if is_probe else agents_mod.ensure_agents()
     return agents_mod.agent_probe_chat if is_probe else agents_mod.agent_chat
 
 
-def get_chat_agent(kind: str = ''):
+def get_chat_agent(kind: str = '', llm_config: dict = None):
     """按 kind（'' = ffmpeg，'ffprobe' = ffprobe）取 chat agent。
 
     在请求期读取模块属性，因此 rebuild_agents() 之后拿到的是最新实例。
     """
-    return chat_agent_for(kind.strip() == 'ffprobe')
+    return chat_agent_for(kind.strip() == 'ffprobe', llm_config)
 
 
 if __name__ == '__main__':

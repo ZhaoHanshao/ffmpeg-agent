@@ -78,6 +78,13 @@ def fake_graph(question, progress=None, **kwargs):
             'history': [type('M', (), {'content': question})()]}
 
 
+class _FakeSpec:
+    """只为通过 _chat_response 的 LLM 可用性检查，不参与图谱执行。"""
+
+    def ensure(self, state=None):
+        return True
+
+
 def run_chat(question, files):
     """跑一次真实的 _chat_response，返回 SSE 事件列表。"""
     captured.clear()
@@ -85,12 +92,14 @@ def run_chat(question, files):
     # 直接 import 时不会触发 lifespan（那要真跑 uvicorn / TestClient），
     # 所以 _init_state 仍是 running；这里显式置为就绪，避免被前置校验挡掉。
     m._init_state['status'] = 'ok'
+    # spec 用真实的 GraphSpec：_chat_response 现在通过 spec.ensure() 判断 LLM 可用性
+    # （多对话改造后不再有 ensure_fn 参数）。测试只关心接线，这里给一个假的图即可。
     response = m._chat_response(
         question, files, [],
         kind='',
         graph_fn=fake_graph,
-        ensure_fn=lambda: True,
         prompt_builder=lambda st: 'prompt',
+        spec=_FakeSpec(),
     )
 
     async def drain():

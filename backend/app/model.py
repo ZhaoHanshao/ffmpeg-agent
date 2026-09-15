@@ -180,3 +180,84 @@ def get_model_config() -> dict:
             'max_tokens': _model_config.get('max_tokens'),
             'configured': is_configured(),
         }
+
+
+# ── 按配置构建（多对话：每个对话可以覆盖全局配置）──
+#
+# 全局配置仍是默认值；对话级覆盖只给"想改的那几个字段"，其余字段继承全局。
+# 因此下面所有函数都只接受/返回**完整配置**，合并逻辑集中在 merged_config()，
+# 避免各处各写一遍"空值算继承吗"的判断。
+
+def get_raw_config() -> dict:
+    """全局配置（含真实 api_key）。仅供服务端内部使用，不要直接返回给前端。"""
+    with _config_lock:
+        return copy.deepcopy(_model_config)
+
+
+def is_config_configured(cfg: dict) -> bool:
+    """判断一份**完整配置**是否可用（model / base_url / api_key 三者齐全）。"""
+    cfg = cfg or {}
+    return bool(cfg.get('model') and cfg.get('base_url') and cfg.get('api_key'))
+
+
+def mask_config(cfg: dict) -> dict:
+    """脱敏后的配置视图（api_key 只留首尾），用于接口返回。"""
+    cfg = cfg or {}
+    api_key = cfg.get('api_key') or ''
+    return {
+        'model': cfg.get('model') or '',
+        'base_url': cfg.get('base_url') or '',
+        'api_key': mask_key(api_key),
+        'key_configured': bool(api_key),
+        'temperature': cfg.get('temperature'),
+        'max_tokens': cfg.get('max_tokens'),
+        'configured': is_config_configured(cfg),
+    }
+
+
+def merged_config(override) -> dict:
+    """把对话级覆盖合并到全局配置上，返回一份校验过的完整配置。
+
+    override 为 None/空 → 直接就是全局配置（"继承"）。
+    api_key 的语义与 update_model_config 一致：留空或回显脱敏值时视为继承全局，
+    这样前端把 GET 到的脱敏值原样 PATCH 回来不会把真 key 抹掉。
+    """
+    with _config_lock:
+        base = copy.deepcopy(_model_config)
+    if not isinstance(override, dict):
+        return base
+    cfg = dict(base)
+    for k in LLM_CONFIG_FIELDS:
+        if k == 'api_key':
+            continue
+        v = override.get(k)
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        cfg[k] = v
+    if 'api_key' in override:
+        incoming = str(override.get('api_key') or '').strip()
+        if incoming and incoming != mask_key(base.get('api_key') or '') and incoming != (base.get('api_key') or ''):
+            cfg['api_key'] = incoming
+    return _validate(cfg)
+
+
+def config_fingerprint(cfg: dict) -> str:
+    """配置指纹：用于缓存"按这份配置构建好的 agent"。
+
+    必须包含真实 api_key——换了 key 却复用旧 agent 会一直用错凭证。
+    """
+    cfg = cfg or {}
+    parts = [str(cfg.get(k) or '') for k in ('model', 'base_url', 'api_key', 'temperature', 'max_tokens')]
+    return '|'.join(parts)
+
+
+def build_model_for(cfg: dict):
+    """按给定完整配置构建 ChatOpenAI；配置不齐全时返回 None。"""
+    if not is_config_configured(cfg):
+        return None
+    kwargs = {k: cfg.get(k) for k in ('model', 'base_url', 'api_key', 'temperature', 'max_tokens')}
+    kwargs['streaming'] = True
+    return ChatOpenAI(**kwargs)
+

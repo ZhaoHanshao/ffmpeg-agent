@@ -84,6 +84,32 @@ export const api = {
   health() {
     return request('/health').then((r) => r.json())
   },
+
+  // ── 多对话 ──
+  listConversations(mode = '') {
+    const qs = mode ? `?mode=${encodeURIComponent(mode)}` : ''
+    return request(`/conversations${qs}`).then((r) => r.json())
+  },
+  createConversation(mode) {
+    return request('/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    }).then((r) => r.json())
+  },
+  getConversation(id) {
+    return request(`/conversations/${encodeURIComponent(id)}`).then((r) => r.json())
+  },
+  updateConversation(id, body) {
+    return request(`/conversations/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => r.json())
+  },
+  deleteConversation(id) {
+    return request(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }).then((r) => r.json())
+  },
 }
 
 export { API_BASE }

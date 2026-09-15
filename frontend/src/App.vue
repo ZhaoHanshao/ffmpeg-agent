@@ -2,15 +2,19 @@
 import { ref, onMounted, watch, nextTick, computed, onUnmounted } from 'vue'
 import { useChat } from './composables/useChat'
 import { useSettings } from './composables/useSettings'
+import { useConversations } from './composables/useConversations'
 import { api } from './api'
 import MessageItem from './components/MessageItem.vue'
 import FilePanel from './components/FilePanel.vue'
 import SelectedFilesBar from './components/SelectedFilesBar.vue'
 import SettingsModal from './components/SettingsModal.vue'
+import ConversationList from './components/ConversationList.vue'
 
 // ── 模式：ffmpeg 处理 / ffprobe 分析 ──
 const mode = ref('ffmpeg')
-const leftCollapsed = ref(false)
+// 两个侧栏都可折叠：对话列表在左，文件面板在右
+const filesCollapsed = ref(false)
+const convCollapsed = ref(false)
 
 // ── 初始化状态（首次运行后台下载模型、构建知识库） ──
 const initStatus = ref('ok')
@@ -76,19 +80,94 @@ const {
   scrollToBottom,
   sendMessage,
   stopChat,
-  clearMessages,
+  setMessages,
   onChatScroll,
 } = useChat(mode)
+
+// ── 多对话 ──
+// 消息由 useChat 拥有，这里只通过 onOpen 把某个对话的历史灌进去
+const {
+  conversations,
+  currentId,
+  current,
+  loading: convLoading,
+  listError,
+  hasOverride,
+  overrideFields,
+  refresh: refreshConversations,
+  reloadForMode,
+  open: openConversation,
+  create: createConversation,
+  ensureId,
+  rename: renameConversation,
+  remove: removeConversation,
+  setOverride,
+} = useConversations(mode, { onOpen: (msgs) => setMessages(msgs) })
 
 const {
   showSettings,
   savingSettings,
   configured,
   settings,
+  convSettings,
+  scope,
+  overrideFields: settingsOverrideFields,
   settingsError,
   loadSettings,
   saveSettings,
-} = useSettings()
+  clearConversationOverride,
+  fillConversationScope,
+} = useSettings({
+  onSaveConversation: (diff) => setOverride(diff),
+  onClearConversation: () => setOverride(null),
+})
+
+// 弹窗里正在编辑哪一份草稿，取决于作用域
+const activeSettings = computed(() => (scope.value === 'conversation' ? convSettings.value : settings.value))
+
+/** 打开设置弹窗：默认改全局；已打开对话时可以在弹窗内切到"仅本对话"。 */
+function openSettings() {
+  scope.value = 'global'
+  settingsError.value = ''
+  fillConversationScope(current.value?.llm_effective, current.value?.llm_override)
+  showSettings.value = true
+}
+
+/** 弹窗内切作用域：切到"仅本对话"时按当前生效配置重新预填。 */
+function onScopeChange(next) {
+  scope.value = next
+  settingsError.value = ''
+  if (next === 'conversation') {
+    fillConversationScope(current.value?.llm_effective, current.value?.llm_override)
+  }
+}
+
+async function selectConversation(id) {
+  if (id === currentId.value) return
+  // 正在生成时切换会中断任务：后端在流结束（含中断）时仍会把这一轮写进原对话
+  if (sending.value) stopChat()
+  selectedFiles.value = []
+  await openConversation(id)
+}
+
+async function newConversation() {
+  if (sending.value) stopChat()
+  selectedFiles.value = []
+  await createConversation()
+  nextTick(() => textareaRef.value?.focus())
+}
+
+async function onDeleteConversation(id) {
+  if (sending.value) stopChat()
+  await removeConversation(id)
+}
+
+async function deleteCurrentConversation() {
+  if (!currentId.value) return
+  const title = current.value?.title || '当前对话'
+  if (!window.confirm(`删除对话「${title}」？该对话的记录将不可恢复。`)) return
+  await onDeleteConversation(currentId.value)
+}
 
 const textareaRef = ref(null)
 const filePanel = ref(null)
@@ -129,8 +208,17 @@ watch(question, () => nextTick(autoResize))
 
 async function doSend() {
   const files = selectedFiles.value.map((s) => ({ ...s }))
-  selectedFiles.value = []
-  await sendMessage(files)
+  try {
+    // 懒创建：第一个问题才建对话，避免每次打开页面都留一个空对话
+    const convId = await ensureId()
+    selectedFiles.value = []
+    await sendMessage(files, convId)
+  } catch (e) {
+    pushSystem(`无法创建对话：${e?.detail || e?.message || e}`)
+    return
+  }
+  // 标题/更新时间/消息数都变了，刷新列表让侧栏跟上
+  refreshConversations()
   await filePanel.value?.refreshOutputFiles()
 }
 
@@ -151,11 +239,24 @@ async function onSend() {
   await doSend()
 }
 
-onMounted(() => {
-  if (window.matchMedia?.('(max-width: 768px)').matches) leftCollapsed.value = true
+// 切换模式时，对话是按模式分开的：重新加载该模式的列表并打开最近一个
+watch(mode, async () => {
+  if (sending.value) stopChat()
+  selectedFiles.value = []
+  await reloadForMode()
+})
+
+onMounted(async () => {
+  if (window.matchMedia?.('(max-width: 768px)').matches) {
+    filesCollapsed.value = true
+    convCollapsed.value = true
+  }
   pollHealth()
   healthTimer = setInterval(pollHealth, healthDelay)
   loadSettings()
+  // 恢复上次的对话：列表最新的一个（按 updated_at 排序）
+  await refreshConversations()
+  if (conversations.value.length) await openConversation(conversations.value[0].id)
 })
 
 onUnmounted(() => {
@@ -191,13 +292,26 @@ onUnmounted(() => {
         </div>
         <button
           class="icon-btn"
-          :class="{ active: !leftCollapsed }"
+          :class="{ active: !convCollapsed }"
+          title="切换对话列表"
+          aria-label="切换对话列表"
+          @click="convCollapsed = !convCollapsed"
+        >💬</button>
+        <button
+          class="icon-btn"
+          :class="{ active: !filesCollapsed }"
           title="切换文件列表"
           aria-label="切换文件列表"
-          @click="leftCollapsed = !leftCollapsed"
+          @click="filesCollapsed = !filesCollapsed"
         >📁</button>
-        <button class="icon-btn" title="清空对话" aria-label="清空对话" @click="clearMessages">🗑️</button>
-        <button class="icon-btn" title="LLM 设置" aria-label="LLM 设置" @click="showSettings = true">
+        <button
+          class="icon-btn"
+          title="删除当前对话"
+          aria-label="删除当前对话"
+          :disabled="!currentId"
+          @click="deleteCurrentConversation"
+        >🗑️</button>
+        <button class="icon-btn" title="LLM 设置（可只对当前对话生效）" aria-label="LLM 设置" @click="openSettings">
           ⚙️
           <span
             v-if="configured !== null"
@@ -225,25 +339,34 @@ onUnmounted(() => {
     <!-- ── 设置弹窗 ── -->
     <SettingsModal
       v-model:show="showSettings"
-      v-model="settings"
+      :settings="activeSettings"
+      :scope="scope"
+      :can-use-conversation-scope="!!currentId"
+      :override-fields="settingsOverrideFields"
       :configured="configured"
       :saving="savingSettings"
       :error="settingsError"
+      @update:scope="onScopeChange"
       @save="saveSettings"
+      @clear-override="clearConversationOverride"
     />
 
-    <!-- ── 双栏主体 ── -->
+    <!-- ── 三栏主体：对话列表 | 对话区 | 文件面板 ── -->
     <div class="body">
-      <FilePanel
-        ref="filePanel"
-        :selected-files="selectedFiles"
-        :class="{ collapsed: leftCollapsed }"
-        @notify="pushSystem"
-        @select-output="addToWorkspace"
-        @removed="onFileRemoved"
+      <ConversationList
+        :conversations="conversations"
+        :current-id="currentId"
+        :loading="convLoading"
+        :error="listError"
+        :sending="sending"
+        :class="{ collapsed: convCollapsed }"
+        @select="selectConversation"
+        @create="newConversation"
+        @rename="renameConversation"
+        @remove="onDeleteConversation"
       />
 
-      <!-- ===== 右栏：对话界面 ===== -->
+      <!-- ===== 中栏：对话界面 ===== -->
       <main class="right-panel">
         <!-- chat-area 把"回到最新"锚定在对话视口内：锚到右栏会在出现
              已选文件栏时压住它（底栏高度会变） -->
@@ -326,9 +449,22 @@ onUnmounted(() => {
           </div>
           <div class="input-hint">
             <kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行
+            <span v-if="current" class="hint-conv" :title="current.title">
+              · 当前对话：{{ current.title }}
+              <template v-if="hasOverride">（模型：{{ current.llm_override?.model || '自定义' }}）</template>
+            </span>
           </div>
         </footer>
       </main>
+
+      <FilePanel
+        ref="filePanel"
+        :selected-files="selectedFiles"
+        :class="{ collapsed: filesCollapsed }"
+        @notify="pushSystem"
+        @select-output="addToWorkspace"
+        @removed="onFileRemoved"
+      />
     </div>
   </div>
 </template>
@@ -462,9 +598,10 @@ button { font-family: inherit; }
   min-height: 0;
 }
 
-/* 左侧面板折叠（类名由父级传入，命中 FilePanel 根元素） */
-.left-panel { transition: margin-left 0.25s var(--dsh-ease); }
-.left-panel.collapsed { margin-left: -361px; }
+/* 左侧对话栏的折叠规则在 ConversationList.vue 里（scoped）；
+   文件面板在中栏之后，往右折叠 */
+.file-panel { transition: margin-right 0.25s var(--dsh-ease); }
+.file-panel.collapsed { margin-right: -341px; }
 
 /* ===== Right Panel ===== */
 .right-panel {
@@ -695,6 +832,17 @@ button { font-family: inherit; }
   border-radius: var(--dsh-r-xs);
   padding: 0 5px;
   color: var(--dsh-text-3);
+}
+/* 当前所在对话：对话多了以后，光看中间区域容易忘记自己在哪一条 */
+.hint-conv {
+  margin-left: 4px;
+  color: var(--dsh-text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46ch;
+  display: inline-block;
+  vertical-align: bottom;
 }
 
 /* ── Keyframes ── */

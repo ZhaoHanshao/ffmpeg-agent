@@ -7,11 +7,17 @@
   （`_search_prompt`、`agent_search`、`_build_agents`、`_search_tool_limit` 等），
   它们现在只是参数化结果或别名，语义与之前一致。
 """
-from app.model import get_model, is_configured
+from app.model import (
+    get_model, is_configured, build_model_for, config_fingerprint, is_config_configured,
+)
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolCallLimitMiddleware
 from app.tools import get_command, get_files, execute_command, get_probe_command, execute_probe_command
 from langchain.messages import SystemMessage
+import logging
+import threading
+
+logger = logging.getLogger(__name__)
 
 # 检索/执行工具在**单次 agent 调用内**的允许次数。
 #
@@ -215,29 +221,95 @@ PROBE_SPEC = AgentSpec(
 
 
 def _create(spec: AgentSpec):
-    """按 spec 构建三个 agent。"""
-    m = get_model()
-    if m is None:
+    """按 spec 用**全局配置**构建三个 agent。"""
+    return _create_with(spec, get_model())
+
+
+def _create_with(spec: AgentSpec, model):
+    """按 spec + 指定模型实例构建三个 agent。"""
+    if model is None:
         return None, None, None
     return (
         create_agent(
-            model=m,
+            model=model,
             system_prompt=SystemMessage(content=spec.search_prompt),
             tools=[spec.search_tool],
             middleware=[spec.search_limit],
         ),
         create_agent(
-            model=m,
+            model=model,
             system_prompt=SystemMessage(content=spec.execute_prompt),
             tools=[get_files, spec.execute_tool],
             middleware=[spec.execute_limit],
         ),
         create_agent(
-            model=m,
+            model=model,
             system_prompt=SystemMessage(content=spec.chat_prompt),
             tools=[],
         ),
     )
+
+
+# ── 按配置指纹缓存的 agent（多对话：每个对话可以用自己的模型）──
+#
+# 为什么缓存而不是每次现建：create_agent 要重新推导工具 schema、编译中间件链，
+# 每个请求建一次纯属浪费；而同一份配置构建出来的 agent 是可复用的（无请求态）。
+# 键必须含真实 api_key（见 model.config_fingerprint），否则换 key 后复用旧 agent。
+_agents_cache = {}
+_agents_cache_order = []
+_cache_lock = threading.Lock()
+_CACHE_MAX = 8
+
+
+def _cache_get(spec_name: str, fingerprint: str):
+    with _cache_lock:
+        return _agents_cache.get((spec_name, fingerprint))
+
+
+def _cache_put(spec_name: str, fingerprint: str, agents):
+    with _cache_lock:
+        key = (spec_name, fingerprint)
+        _agents_cache[key] = agents
+        _agents_cache_order.append(key)
+        # 简单 FIFO 淘汰：绑定多个模型时缓存不会无限增长
+        while len(_agents_cache_order) > _CACHE_MAX:
+            old = _agents_cache_order.pop(0)
+            if old != key:
+                _agents_cache.pop(old, None)
+
+
+def clear_agent_cache():
+    with _cache_lock:
+        _agents_cache.clear()
+        _agents_cache_order.clear()
+
+
+def agents_for(spec: AgentSpec, cfg: dict = None):
+    """返回 (search, execute, chat)。
+
+    cfg 为 None/空 → 全局配置（等价于 spec.agents()）。
+    cfg 为完整配置 → 按指纹缓存构建，对话级模型覆盖走这条路。
+    """
+    if not cfg:
+        return _create(spec)
+    if not is_config_configured(cfg):
+        return None, None, None
+    fingerprint = config_fingerprint(cfg)
+    cached = _cache_get(spec.name, fingerprint)
+    if cached is not None:
+        return cached
+    model = build_model_for(cfg)
+    if model is None:
+        return None, None, None
+    built = _create_with(spec, model)
+    _cache_put(spec.name, fingerprint, built)
+    logger.info(f'按对话级配置构建 {spec.name} agents（model={cfg.get("model")}）')
+    return built
+
+
+def ensure_agents_for(spec: AgentSpec, cfg: dict = None) -> bool:
+    return agents_for(spec, cfg)[0] is not None
+
 
 
 # ── 模块级 agent 句柄（None 表示 LLM 未配置；rebuild_agents 会重新赋值）──

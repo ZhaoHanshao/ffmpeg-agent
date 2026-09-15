@@ -59,8 +59,8 @@ get_chat_agent = _graph_mod.get_chat_agent
 GraphCancelled = _graph_mod.GraphCancelled
 
 _agents_mod = _step_import('app.agents', 'app.agents')
-ensure_agents = _agents_mod.ensure_agents
-ensure_probe_agents = _agents_mod.ensure_probe_agents
+# 现在是按对话级配置取 agent（GraphSpec.ensure / agents_for），
+# 不再直接持有 ensure_agents，避免"全局一份 agent"的旧假设又被引回来。
 
 _messages_mod = _step_import('langchain.messages', 'langchain.messages')
 HumanMessage = _messages_mod.HumanMessage
@@ -346,16 +346,24 @@ def _friendly_error(e: Exception) -> str:
     return f'知识库查询或命令执行失败：{text[:400]}'
 
 
-async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job=None, prep_fn=None):
+async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job=None, prep_fn=None,
+                        conversation_id: str = '', user_files: list = None):
     """公共 SSE 流：job → (素材理解) → graph 进度 → meta → chat 逐 token → done
 
     prep_fn(status_list) 可选：在图谱之前运行的准备步骤（多模态素材分析），
     返回值会注入图谱状态，供执行 agent 决定参数。
+
+    conversation_id 非空时，本轮问答在流结束时落库（无论成功、失败还是被取消——
+    失败同样是有信息量的历史，丢掉会让用户重开对话后不知道自己问过什么）。
     """
     stop_event = job['stop'] if job else None
     job_id = job['job_id'] if job else ''
     progress = []
     graph_task = None
+    # 落库用的累积变量：必须在 try 之前初始化，提前 return 的路径也能拿到
+    full_text = ''
+    reply_error = ''
+    output_file = ''
     try:
         yield f"data: {json.dumps({'event': 'job', 'job_id': job_id})}\n\n"
 
@@ -394,7 +402,8 @@ async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job
             return
         except Exception as e:
             logger.error(f'图谱执行失败：{e}')
-            yield f"data: {json.dumps({'event': 'error', 'text': _friendly_error(e)})}\n\n"
+            reply_error = _friendly_error(e)
+            yield f"data: {json.dumps({'event': 'error', 'text': reply_error})}\n\n"
             yield "data: {\"event\": \"done\"}\n\n"
             return
 
@@ -405,7 +414,6 @@ async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job
         yield f"data: {json.dumps({'event': 'status', 'text': '正在生成回答...'})}\n\n"
 
         chat_prompt = prompt_builder(exec_state)
-        full_text = ''
         try:
             async for event in chat_agent.astream_events(
                 {"messages": [HumanMessage(content=chat_prompt)]},
@@ -419,7 +427,8 @@ async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job
                         yield f"data: {json.dumps({'event': 'token', 'text': content})}\n\n"
         except Exception as e:
             # 与图谱阶段一致：用可执行的提示替代原始异常
-            yield f"data: {json.dumps({'event': 'error', 'text': _friendly_error(e)})}\n\n"
+            reply_error = _friendly_error(e)
+            yield f"data: {json.dumps({'event': 'error', 'text': reply_error})}\n\n"
             yield "data: {\"event\": \"done\"}\n\n"
             return
 
@@ -442,6 +451,17 @@ async def _event_stream(question: str, graph_fn, chat_agent, prompt_builder, job
                         pass
         if job_id:
             _unregister_job(job_id)
+        if conversation_id:
+            try:
+                append_turn(
+                    conversation_id,
+                    {'text': question, 'files': user_files or []},
+                    # 错误只存进 error 字段，不再拼一份到 text：前端会把 error 渲染成
+                    # 独立告警块，两处都存会让重新打开对话时同一条错误显示两遍。
+                    {'text': full_text, 'output_file': output_file, 'error': reply_error},
+                )
+            except Exception as e:  # noqa: BLE001 - 落库失败不应影响已经推完的流
+                logger.warning(f'写入对话记录失败（会话 {conversation_id}）：{e}')
 
 
 def _sanitize_selected_files(files: list[str]) -> list[str]:
@@ -476,12 +496,57 @@ def _sse_error(text: str) -> Response:
     )
 
 
-def _chat_response(question, files, history, *, kind, graph_fn, ensure_fn, prompt_builder):
+def _selected_file_refs(selected: list) -> list:
+    """把服务端选中的绝对路径转成前端用的 {name, src} 引用，用于历史回显。"""
+    refs = []
+    for path in selected or []:
+        name = os.path.basename(path)
+        try:
+            inside_output = os.path.dirname(os.path.abspath(path)) == os.path.abspath(DOWNLOAD_DIR)
+        except OSError:
+            inside_output = False
+        refs.append({'name': name, 'src': 'output' if inside_output else 'upload'})
+    return refs
+
+
+def _resolve_conversation(conversation_id: str):
+    """取对话记录并算出本轮要用的 LLM 配置。
+
+    返回 (record, llm_config, error_message)：
+    - llm_config 为 None 表示用全局配置（对话没有覆盖）
+    - error_message 非空表示对话不存在或覆盖配置非法，调用方应直接 SSE 报错
+    """
+    if not conversation_id:
+        return None, None, ''
+    record = get_conversation(conversation_id)
+    if not record:
+        return None, None, '对话不存在或已被删除，请在左侧重新选择一个对话'
+    override = record.get('llm')
+    if not override:
+        # 没有覆盖也要把全局配置的"快照"带上吗？不带：全局配置改了（如换了模型）
+        # 本对话应该立刻跟着变，这才是"继承"的语义。
+        return record, None, ''
+    try:
+        cfg = merged_config(override)
+    except ValueError as e:
+        return record, None, f'本对话的模型配置无效：{e}'
+    if not is_config_configured(cfg):
+        return record, None, '本对话的模型配置不完整，请补全模型名称/接口地址/API Key'
+    return record, cfg, ''
+
+
+def _chat_response(question, files, history, *, kind, graph_fn, prompt_builder, spec,
+                   mode='ffmpeg', conversation_id=''):
     """两个 chat 路由的公共实现（ffmpeg / ffprobe 仅参数不同）。"""
     if _init_state['status'] == 'running':
         return _sse_error('正在初始化知识库（首次运行需下载模型，请稍候）')
 
-    if not ensure_fn():
+    record, llm_config, conv_error = _resolve_conversation(conversation_id)
+    if conv_error:
+        return _sse_error(conv_error)
+
+    # 带对话级配置时按该配置构建/取用 agent；否则走全局 agent
+    if not spec.ensure({'llm_config': llm_config}):
         return _sse_error('LLM 未配置，请先在页面右上角 ⚙️ 设置中填写模型信息')
 
     selected = _sanitize_selected_files(files)
@@ -492,6 +557,8 @@ def _chat_response(question, files, history, *, kind, graph_fn, ensure_fn, promp
     logger.info(f'处理{kind}对话')
     logger.info(f'用户问题：{question[:200]}')
     logger.info(f'选择文件：{selected}')
+    if conversation_id:
+        logger.info(f'对话：{conversation_id}（模型：{(llm_config or {}).get("model") or "继承全局"}）')
     if explicit:
         logger.info(f'用户显式参数：{explicit}')
 
@@ -515,42 +582,51 @@ def _chat_response(question, files, history, *, kind, graph_fn, ensure_fn, promp
         return graph_fn(q, p, files=selected, context=context,
                         stop_event=job['stop'], proc_box=job['proc'],
                         media_analysis=analysis_box.get('text', ''),
-                        explicit_params=explicit)
+                        explicit_params=explicit,
+                        llm_config=llm_config)
 
     return StreamingResponse(
         _event_stream(
             question,
             _run_graph,
-            get_chat_agent(kind),
+            get_chat_agent(kind, llm_config),
             prompt_builder,
             job={'job_id': job_id, **job},
             prep_fn=_prep if selected else None,
+            conversation_id=conversation_id,
+            user_files=_selected_file_refs(selected),
         ),
         media_type="text/event-stream",
     )
 
 
 @app.post("/api/chat")
-async def chat(question: str = Form(...), files: list[str] = Form(default=[]), history: list[str] = Form(default=[])):
+async def chat(question: str = Form(...), files: list[str] = Form(default=[]),
+               history: list[str] = Form(default=[]), conversation_id: str = Form(default='')):
     """发送问题 → 流式输出（ffmpeg search+execute 进度 + chat 逐 token）"""
     return _chat_response(
         question, files, history,
         kind='',
         graph_fn=exec_graph,
-        ensure_fn=ensure_agents,
         prompt_builder=build_chat_prompt,
+        spec=FFMPEG_GRAPH,
+        mode='ffmpeg',
+        conversation_id=conversation_id,
     )
 
 
 @app.post("/api/probe/chat")
-async def probe_chat(question: str = Form(...), files: list[str] = Form(default=[]), history: list[str] = Form(default=[])):
+async def probe_chat(question: str = Form(...), files: list[str] = Form(default=[]),
+                     history: list[str] = Form(default=[]), conversation_id: str = Form(default='')):
     """发送问题 → 流式输出（ffprobe search+execute 进度 + chat 逐 token）"""
     return _chat_response(
         question, files, history,
         kind='ffprobe ',
         graph_fn=probe_exec_graph,
-        ensure_fn=ensure_probe_agents,
         prompt_builder=build_probe_chat_prompt,
+        spec=PROBE_GRAPH,
+        mode='ffprobe',
+        conversation_id=conversation_id,
     )
 
 
@@ -688,9 +764,18 @@ from fastapi.staticfiles import StaticFiles
 
 
 # ── LLM 设置 ──
-from app.model import get_model_config, update_model_config
+from app.model import (
+    get_model_config, update_model_config, merged_config, mask_config,
+    is_config_configured, build_model_for,
+)
 # 用户显式写出的 ffmpeg 参数（如 -crf 18）需要原样保留，不被模型改写
 from app.media import extract_explicit_params
+# 多对话：会话记录持久化 + 对话级模型覆盖
+from app.conversations import (
+    append_turn, list_conversations, create_conversation, get_conversation,
+    rename_conversation, set_llm_override, delete_conversation, stats as conversation_stats,
+)
+from app.graph import FFMPEG_GRAPH, PROBE_GRAPH
 
 
 @app.get("/api/settings/llm")
@@ -718,13 +803,111 @@ async def update_llm_settings(body: dict):
     return cfg
 
 
-async def _check_llm_connection() -> dict:
-    """用 1 个 token 试调一次，返回 {'ok': bool, 'message': str}。"""
+# ── 多对话 ──
+
+def _conversation_view(record: dict) -> dict:
+    """给前端的对话详情：消息 + 脱敏后的覆盖配置 + 实际生效配置。"""
+    out = {
+        'id': record['id'],
+        'title': record.get('title') or '新对话',
+        'mode': record.get('mode') or 'ffmpeg',
+        'created_at': record.get('created_at') or 0,
+        'updated_at': record.get('updated_at') or 0,
+        'messages': record.get('messages') or [],
+        'llm_override': None,
+        'llm_effective': None,
+    }
+    override = record.get('llm')
+    if override:
+        view = dict(override)
+        if view.get('api_key'):
+            view['api_key'] = mask_key(view['api_key'])
+        out['llm_override'] = view
     try:
-        from app.model import get_model
+        out['llm_effective'] = mask_config(merged_config(override))
+    except ValueError as e:
+        out['llm_effective'] = {'configured': False, 'error': str(e)}
+    return out
+
+
+@app.get("/api/conversations")
+async def list_conversations_route(mode: str = ''):
+    """列出对话（最新更新在前）；mode 为空时返回全部模式。"""
+    return {"conversations": list_conversations(mode)}
+
+
+@app.post("/api/conversations")
+async def create_conversation_route(body: dict = None):
+    body = body or {}
+    record = create_conversation(body.get('mode', 'ffmpeg'), body.get('title', ''))
+    return _conversation_view(record)
+
+
+@app.get("/api/conversations/{cid}")
+async def get_conversation_route(cid: str):
+    record = get_conversation(cid)
+    if not record:
+        raise HTTPException(status_code=404, detail='对话不存在')
+    return _conversation_view(record)
+
+
+@app.patch("/api/conversations/{cid}")
+async def update_conversation_route(cid: str, body: dict):
+    """改名 / 设置对话级模型覆盖。
+
+    body = {"title": "..."} 改名；
+    body = {"llm": {...}}   设置覆盖（字段级，未给的仍继承全局）；
+    body = {"llm": null}    清除覆盖，恢复继承全局。
+    """
+    body = body or {}
+    if not get_conversation(cid):
+        raise HTTPException(status_code=404, detail='对话不存在')
+
+    if 'title' in body:
+        if not rename_conversation(cid, body.get('title') or ''):
+            raise HTTPException(status_code=404, detail='对话不存在')
+
+    if 'llm' in body:
+        override = body.get('llm')
+        if override:
+            if not isinstance(override, dict):
+                raise HTTPException(status_code=400, detail='llm 必须是对象或 null')
+            # 先按合并后的结果校验：temperature 越界、base_url 非法等在这里拦下
+            try:
+                effective = merged_config(override)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            if not set_llm_override(cid, override):
+                raise HTTPException(status_code=404, detail='对话不存在')
+            # 覆盖里改了连接相关字段时做一次连通性检查（与全局设置一致：先落盘再报错）
+            if any(k in override for k in ('model', 'base_url', 'api_key')):
+                check = await _check_llm_connection(effective)
+                if not check['ok']:
+                    raise HTTPException(status_code=400, detail=check['message'])
+        else:
+            if not set_llm_override(cid, None):
+                raise HTTPException(status_code=404, detail='对话不存在')
+
+    record = get_conversation(cid)
+    return _conversation_view(record)
+
+
+@app.delete("/api/conversations/{cid}")
+async def delete_conversation_route(cid: str):
+    if not delete_conversation(cid):
+        raise HTTPException(status_code=404, detail='对话不存在')
+    return {"deleted": cid}
+
+
+async def _check_llm_connection(cfg: dict = None) -> dict:
+    """用 1 个 token 试调一次，返回 {'ok': bool, 'message': str}。
+
+    cfg 为空时测全局配置，否则测给定配置（对话级覆盖）。
+    """
+    try:
         from langchain.messages import HumanMessage
 
-        m = get_model()
+        m = build_model_for(cfg) if cfg else get_model()
         if m is None:
             return {'ok': False, 'message': '模型未构建（配置不完整）'}
         await m.ainvoke([HumanMessage(content='ping')], config={'max_tokens': 1})

@@ -195,7 +195,7 @@ onMounted(refreshAll)
 </script>
 
 <template>
-  <aside class="left-panel">
+  <aside class="file-panel">
     <section class="upload-section">
       <div
         class="drop-zone"
@@ -348,12 +348,13 @@ onMounted(refreshAll)
 </template>
 
 <style scoped>
-.left-panel {
+.file-panel {
   width: 340px;
   flex-shrink: 0;
   overflow: hidden;
   background: var(--dsh-surface);
-  border-right: 1px solid var(--dsh-border);
+  /* 文件面板现在在最右侧，分隔线改到左边 */
+  border-left: 1px solid var(--dsh-border);
   padding: 14px 14px 12px;
   display: flex;
   flex-direction: column;
