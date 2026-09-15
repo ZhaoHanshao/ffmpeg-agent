@@ -72,6 +72,8 @@ const {
   sending,
   canSend,
   chatContainer,
+  autoScroll,
+  scrollToBottom,
   sendMessage,
   stopChat,
   clearMessages,
@@ -243,7 +245,7 @@ onUnmounted(() => {
 
       <!-- ===== 右栏：对话界面 ===== -->
       <main class="right-panel">
-        <div ref="chatContainer" class="chat-messages" @scroll="onChatScroll">
+        <div ref="chatContainer" class="chat-messages" role="log" aria-label="对话记录" @scroll="onChatScroll">
           <div v-if="!messages.length" class="empty-chat">
             <div class="empty-icon">{{ mode === 'ffprobe' ? '🔍' : '💬' }}</div>
             <p class="empty-title">{{ mode === 'ffprobe' ? '想查看这个文件的哪些信息？' : '想对这个文件做什么？' }}</p>
@@ -285,6 +287,14 @@ onUnmounted(() => {
 
           <MessageItem v-for="(msg, i) in messages" :key="i" :msg="msg" />
         </div>
+
+        <!-- 用户往上翻看历史时，新内容仍在流入：给一个明确的"回到最新"入口 -->
+        <button
+          v-if="messages.length && !autoScroll"
+          class="jump-btn"
+          type="button"
+          @click="scrollToBottom('smooth')"
+        >↓ 回到最新</button>
 
         <!-- ── 选中文件栏 + 输入栏 ── -->
         <SelectedFilesBar
@@ -459,6 +469,7 @@ button { font-family: inherit; }
   flex-direction: column;
   overflow: hidden;
   min-width: 0;
+  position: relative;
 }
 
 /* ── Chat Messages ── */
@@ -472,12 +483,42 @@ button { font-family: inherit; }
 }
 .chat-messages::-webkit-scrollbar { width: 8px; }
 .chat-messages::-webkit-scrollbar-thumb {
-  background: #d5d9e2;
+  background: var(--dsh-scroll-thumb);
   border-radius: var(--dsh-r-pill);
   border: 2px solid transparent;
   background-clip: content-box;
 }
-.chat-messages::-webkit-scrollbar-thumb:hover { background: #b9bfcc; background-clip: content-box; }
+.chat-messages::-webkit-scrollbar-thumb:hover {
+  background: var(--dsh-scroll-thumb-hover);
+  background-clip: content-box;
+}
+
+/* ── 回到最新 ── */
+.jump-btn {
+  position: absolute;
+  left: 50%;
+  bottom: 86px;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border: 1px solid var(--dsh-border);
+  border-radius: var(--dsh-r-pill);
+  background: var(--dsh-surface);
+  color: var(--dsh-text-2);
+  font-size: var(--dsh-fs-base);
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: var(--dsh-shadow-md);
+  animation: jump-in 0.18s var(--dsh-ease);
+}
+.jump-btn:hover { color: var(--dsh-brand); border-color: var(--dsh-brand-line); }
+@keyframes jump-in {
+  from { opacity: 0; transform: translate(-50%, 6px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
 
 .empty-chat {
   flex: 1;
@@ -520,7 +561,7 @@ button { font-family: inherit; }
   justify-content: center;
   gap: 8px;
   margin-top: 20px;
-  max-width: 560px;
+  max-width: 720px;
 }
 .example-chip {
   display: inline-flex;
@@ -614,7 +655,7 @@ button { font-family: inherit; }
 }
 .send-btn.stop {
   background: var(--dsh-danger);
-  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+  box-shadow: var(--dsh-shadow-danger);
 }
 .send-btn.stop:hover { background: var(--dsh-danger-strong); }
 /* 用 CSS 方块代替 ⏹ emoji：emoji 在不同平台粗细/大小不一 */

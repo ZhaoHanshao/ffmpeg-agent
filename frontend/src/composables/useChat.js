@@ -53,7 +53,11 @@ export function useChat(mode) {
 
     messages.value.push({ role: 'user', text, files })
     question.value = ''
-    const reply = reactive({ role: 'ai', text: '', outputFile: '', stage: '' })
+    // error 独立于 text：错误块要单独排版，不能混进 markdown 正文里
+    const reply = reactive({
+      role: 'ai', text: '', outputFile: '', stage: '', error: '',
+      pending: true, streaming: true,
+    })
     messages.value.push(reply)
     sending.value = true
     autoScroll.value = true
@@ -111,14 +115,19 @@ export function useChat(mode) {
               // 阶段提示单独放 stage：它可能包含"正在理解素材画面…"这类
               // 多模态分析进展，不该覆盖正在流式输出的回答正文。
               reply.stage = data.text
+              reply.pending = false
             } else if (data.event === 'token') {
               if (reply.stage) reply.stage = ''
+              reply.pending = false
               reply.text += data.text
             } else if (data.event === 'meta' && data.output_file) {
               reply.outputFile = data.output_file
+              reply.pending = false
             } else if (data.event === 'error') {
               if (reply.stage) reply.stage = ''
-              reply.text += `\n[错误] ${data.text}`
+              reply.error = data.text
+              reply.pending = false
+              reply.streaming = false
             }
           } catch {
             // 不完整的 JSON，等待下一个数据块补全
@@ -127,16 +136,19 @@ export function useChat(mode) {
         scheduleScroll()
       }
     } catch (e) {
-      if (e.name !== 'AbortError') reply.text = `请求失败: ${e.message}`
+      if (e.name !== 'AbortError') reply.error = `请求失败：${e.message}`
     } finally {
       if (ac.signal.aborted && reply.text) reply.text += '\n\n⏹ 已停止'
       reply.stage = ''
+      reply.pending = false
+      reply.streaming = false
       sending.value = false
       controller = null
       jobId = ''
       cancelAnimationFrame(rafId)
       rafId = 0
-      scrollToBottom('smooth')
+      // 用户已经往上翻看历史时不要把他拽回底部（页面上有"回到最新"按钮可用）
+      if (autoScroll.value) scrollToBottom('smooth')
     }
 
     return reply.outputFile
@@ -162,6 +174,8 @@ export function useChat(mode) {
     sending,
     canSend,
     chatContainer,
+    autoScroll,
+    scrollToBottom,
     sendMessage,
     stopChat,
     clearMessages,

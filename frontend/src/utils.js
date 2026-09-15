@@ -59,12 +59,26 @@ export function sanitizeHtml(html) {
   for (const pre of doc.querySelectorAll('pre')) {
     const wrap = doc.createElement('div')
     wrap.className = 'code-block'
+    // 顶部工具条：左边语言、右边复制。常驻显示，不再依赖悬停
+    // （旧实现把按钮绝对定位在右上角、悬停才显形，触屏设备永远看不到，
+    //  还得给 pre 预留 32px 空白带，标题区看着像被挖了个洞）。
+    const bar = doc.createElement('div')
+    bar.className = 'code-bar'
+    const codeEl = pre.querySelector('code')
+    const matched = /(?:language|lang)-([\w+#.-]+)/.exec((codeEl && codeEl.className) || '')
+    if (matched) {
+      const lang = doc.createElement('span')
+      lang.className = 'code-lang'
+      lang.textContent = matched[1]
+      bar.appendChild(lang)
+    }
     const btn = doc.createElement('button')
     btn.className = 'code-copy'
     btn.type = 'button'
     btn.textContent = '⧉ 复制'
+    bar.appendChild(btn)
     pre.parentNode.insertBefore(wrap, pre)
-    wrap.appendChild(btn)
+    wrap.appendChild(bar)
     wrap.appendChild(pre)
   }
   return doc.body.innerHTML

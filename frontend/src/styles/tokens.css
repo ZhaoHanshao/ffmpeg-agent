@@ -42,6 +42,24 @@
   --dsh-warn-line: #fde68a;
   --dsh-warn-accent: #f59e0b;
 
+  /* ── 代码块 ── */
+  --dsh-code-bg: #0f172a;
+  --dsh-code-fg: #e2e8f0;
+  --dsh-code-muted: #cbd5e1;
+  --dsh-code-line: rgba(255, 255, 255, 0.25);
+  --dsh-code-hover: rgba(255, 255, 255, 0.2);
+  --dsh-code-veil: rgba(255, 255, 255, 0.12);
+
+  /* ── 滚动条 ── */
+  --dsh-scroll-thumb: #d5d9e2;
+  --dsh-scroll-thumb-hover: #b9bfcc;
+
+  /* ── 品牌色底上的前景（用户气泡内部）── */
+  --dsh-on-brand-veil: rgba(255, 255, 255, 0.18);
+  --dsh-on-brand-veil-strong: rgba(255, 255, 255, 0.25);
+  --dsh-on-brand-line: rgba(255, 255, 255, 0.32);
+  --dsh-on-brand-link: #dbe2ff;
+
   /* ── 圆角 ── */
   --dsh-r-xs: 6px;
   --dsh-r-sm: 8px;
@@ -56,6 +74,7 @@
   --dsh-shadow-md: 0 4px 12px rgba(16, 24, 40, 0.08), 0 1px 3px rgba(16, 24, 40, 0.04);
   --dsh-shadow-lg: 0 12px 32px rgba(16, 24, 40, 0.14), 0 2px 8px rgba(16, 24, 40, 0.06);
   --dsh-shadow-brand: 0 2px 8px rgba(79, 110, 247, 0.28);
+  --dsh-shadow-danger: 0 2px 8px rgba(239, 68, 68, 0.3);
 
   /* ── 焦点环（键盘无障碍）── */
   --dsh-ring: 0 0 0 3px rgba(79, 110, 247, 0.18);
