@@ -10,6 +10,23 @@ export function isAudio(name) {
   return /\.(mp3|wav|flac|aac|m4a|ogg|opus|wma)$/i.test(name)
 }
 
+/** 能按纯文本读出来展示的类型（字幕/日志/配置等）。 */
+export function isText(name) {
+  return /\.(srt|ass|ssa|vtt|sub|json|txt|log|xml|csv|md|ya?ml|ini|conf)$/i.test(name)
+}
+
+/**
+ * 预览方式：image / video / audio / text / none。
+ * 集中在这里，避免文件面板和消息区各写一套扩展名判断后逐渐跑偏。
+ */
+export function previewKind(name) {
+  if (isImage(name)) return 'image'
+  if (isVideo(name)) return 'video'
+  if (isAudio(name)) return 'audio'
+  if (isText(name)) return 'text'
+  return 'none'
+}
+
 /** 按扩展名给出文件类型图标与中文类型名，用于文件列表与消息里的文件标签。 */
 export function fileKind(name) {
   const n = String(name || '').toLowerCase()
@@ -33,12 +50,6 @@ export function formatSize(bytes) {
     i += 1
   }
   return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`
-}
-
-/** Content-Length 可能是 null/空串，统一解析成数字（失败返回 0）。 */
-export function parseContentLength(headerValue) {
-  const n = parseInt(headerValue ?? '', 10)
-  return Number.isFinite(n) && n > 0 ? n : 0
 }
 
 export function sanitizeHtml(html) {

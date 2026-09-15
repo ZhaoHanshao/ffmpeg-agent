@@ -9,6 +9,7 @@ import FilePanel from './components/FilePanel.vue'
 import SelectedFilesBar from './components/SelectedFilesBar.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import ConversationList from './components/ConversationList.vue'
+import FilePreviewModal from './components/FilePreviewModal.vue'
 
 // ── 模式：ffmpeg 处理 / ffprobe 分析 ──
 const mode = ref('ffmpeg')
@@ -171,6 +172,37 @@ async function deleteCurrentConversation() {
 
 const textareaRef = ref(null)
 const filePanel = ref(null)
+
+// ── 文件预览弹窗（App 级单例：文件面板和消息区都往这里投递） ──
+const showPreview = ref(false)
+const previewIndex = ref(0)
+const previewSrcKind = ref('upload')
+const previewFiles = ref([])
+
+// 消息区预览输出文件时，把整个对话产出的输出文件作为可左右切换的列表
+const conversationOutputs = computed(() =>
+  [...new Set(messages.value.map((m) => m.outputFile).filter(Boolean))]
+)
+
+/**
+ * 打开预览。
+ * list 为空时退化成"只有当前文件"（没有左右切换）——上传文件目前就是这种，
+ * 因为消息里的上传文件引用不一定在当前 upload/ 列表里。
+ */
+function openPreview({ name, src = 'upload', list = null }) {
+  if (!name) return
+  const files = (list && list.length ? [...list] : [name]).filter(Boolean)
+  const idx = files.indexOf(name)
+  previewFiles.value = files
+  previewIndex.value = idx >= 0 ? idx : 0
+  previewSrcKind.value = src === 'output' ? 'output' : 'upload'
+  showPreview.value = true
+}
+
+function onMessagePreview({ name, src }) {
+  const list = src === 'output' ? conversationOutputs.value : null
+  openPreview({ name, src, list })
+}
 
 // ── 选中的待处理文件（仅本地选择态，不移除服务器文件） ──
 // 元素：{ name: 文件名, src: 'upload' | 'output' }
@@ -351,6 +383,14 @@ onUnmounted(() => {
       @clear-override="clearConversationOverride"
     />
 
+    <!-- ── 文件预览弹窗 ── -->
+    <FilePreviewModal
+      v-model:show="showPreview"
+      v-model:index="previewIndex"
+      :files="previewFiles"
+      :src="previewSrcKind"
+    />
+
     <!-- ── 三栏主体：对话列表 | 对话区 | 文件面板 ── -->
     <div class="body">
       <ConversationList
@@ -411,7 +451,7 @@ onUnmounted(() => {
               </p>
             </div>
 
-            <MessageItem v-for="(msg, i) in messages" :key="i" :msg="msg" />
+            <MessageItem v-for="(msg, i) in messages" :key="i" :msg="msg" @preview="onMessagePreview" />
           </div>
 
           <!-- 用户往上翻看历史时，新内容仍在流入：给一个明确的"回到最新"入口 -->
@@ -464,6 +504,7 @@ onUnmounted(() => {
         @notify="pushSystem"
         @select-output="addToWorkspace"
         @removed="onFileRemoved"
+        @preview="openPreview"
       />
     </div>
   </div>

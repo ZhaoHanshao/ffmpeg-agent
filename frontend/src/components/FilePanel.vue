@@ -1,9 +1,10 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { api, API_BASE, authHeaders } from '../api'
-import { fileKind, formatSize, parseContentLength } from '../utils'
+import { api } from '../api'
+import { fileKind, formatSize } from '../utils'
+import { fetchFileSize, downloadFile } from '../composables/useFileUrl'
 
-const emit = defineEmits(['notify', 'select-output', 'removed'])
+const emit = defineEmits(['notify', 'select-output', 'removed', 'preview'])
 
 const props = defineProps({
   selectedFiles: { type: Array, default: () => [] },
@@ -33,18 +34,10 @@ function sizeOf(name) {
 async function loadSizes(names, base) {
   const targets = (names || []).filter((n) => sizes.value[n] === undefined)
   if (!targets.length) return
+  // 走 Range 请求取体积：HEAD 在这个 FastAPI/Starlette 版本上会 404
+  // （详见 useFileUrl.fetchFileSize 的注释），所以文件大小以前一直显示不出来。
   const results = await Promise.all(
-    targets.map(async (n) => {
-      try {
-        const res = await fetch(`${API_BASE}/${base}/${encodeURIComponent(n)}`, {
-          method: 'HEAD',
-          headers: authHeaders(),
-        })
-        return [n, res.ok ? parseContentLength(res.headers.get('Content-Length')) : 0]
-      } catch {
-        return [n, 0]
-      }
-    })
+    targets.map(async (n) => [n, await fetchFileSize(n, base)])
   )
   const next = { ...sizes.value }
   for (const [n, sz] of results) next[n] = sz
@@ -124,6 +117,16 @@ async function doUpload(files) {
 
 function addToWorkspace(filename, src) {
   emit('select-output', filename, src)
+}
+
+/** 请求弹窗预览；带上整个列表，弹窗里可以左右切换。 */
+function requestPreview(filename, src, list) {
+  emit('preview', { name: filename, src, list: [...list] })
+}
+
+// 下载统一走 useFileUrl.downloadFile：开了 AUTH_TOKEN 时 <a href=直链 download> 会 401
+function download(filename, src) {
+  downloadFile(filename, src).catch((e) => emit('notify', `下载失败: ${e?.message || e}`))
 }
 
 function isSelected(src, name) {
@@ -238,8 +241,10 @@ onMounted(refreshAll)
           <div
             v-for="f in uploadedFiles"
             :key="f"
-            class="file-row"
+            class="file-row clickable"
             :class="{ selected: isSelected('upload', f) }"
+            title="点击预览"
+            @click="requestPreview(f, 'upload', uploadedFiles)"
           >
             <span class="file-icon" :title="fileKind(f).label">{{ fileKind(f).icon }}</span>
             <div class="file-meta">
@@ -248,20 +253,25 @@ onMounted(refreshAll)
             </div>
             <div class="file-actions">
               <button
+                class="file-btn preview"
+                title="预览"
+                aria-label="预览"
+                @click.stop="requestPreview(f, 'upload', uploadedFiles)"
+              >👁</button>
+              <button
                 class="file-btn add"
                 :class="{ active: isSelected('upload', f) }"
                 title="加入工作区"
                 aria-label="加入工作区"
-                @click="addToWorkspace(f, 'upload')"
+                @click.stop="addToWorkspace(f, 'upload')"
               >＋</button>
-              <a
-                :href="`${API_BASE}/upload/${encodeURIComponent(f)}`"
+              <button
                 class="file-btn download"
                 title="下载"
                 aria-label="下载"
-                download
-              >⬇</a>
-              <button class="file-btn delete" title="删除" aria-label="删除" @click="deleteUploadedFile(f)">🗑</button>
+                @click.stop="download(f, 'upload')"
+              >⬇</button>
+              <button class="file-btn delete" title="删除" aria-label="删除" @click.stop="deleteUploadedFile(f)">🗑</button>
             </div>
           </div>
         </div>
@@ -309,20 +319,24 @@ onMounted(refreshAll)
             </div>
             <div class="file-actions">
               <button
+                class="file-btn preview"
+                title="预览"
+                aria-label="预览"
+                @click.stop="requestPreview(f, 'output', outputFiles)"
+              >👁</button>
+              <button
                 class="file-btn add"
                 :class="{ active: isSelected('output', f) }"
                 title="加入工作区（用于下一步处理）"
                 aria-label="加入工作区"
                 @click.stop="addToWorkspace(f, 'output')"
               >＋</button>
-              <a
-                :href="`${API_BASE}/output/${encodeURIComponent(f)}`"
+              <button
                 class="file-btn download"
                 title="下载"
                 aria-label="下载"
-                download
-                @click.stop
-              >⬇</a>
+                @click.stop="download(f, 'output')"
+              >⬇</button>
               <button class="file-btn delete" title="删除" aria-label="删除" @click.stop="deleteOutputFile(f)">🗑</button>
             </div>
           </div>
@@ -488,6 +502,8 @@ onMounted(refreshAll)
 }
 .file-row:hover { background: var(--dsh-surface-2); }
 .file-row.selectable { cursor: pointer; }
+/* 已上传列表的行没有别的用途，整行点击即预览 */
+.file-row.clickable { cursor: pointer; }
 .file-row.selected { background: var(--dsh-brand-soft); }
 .file-row.selected:hover { background: #e3e8ff; }
 .file-icon { font-size: 15px; flex-shrink: 0; line-height: 1; }
@@ -533,9 +549,14 @@ onMounted(refreshAll)
   color: var(--dsh-text-3);
 }
 .file-btn:hover { background: #e6e8ee; text-decoration: none; }
+.file-btn.preview:hover { background: var(--dsh-brand-soft); color: var(--dsh-brand); }
 .file-btn.add:hover { background: var(--dsh-brand-soft); color: var(--dsh-brand); }
 .file-btn.add.active { background: var(--dsh-brand); color: #fff; }
 .file-btn.delete:hover { background: var(--dsh-danger-soft); color: var(--dsh-danger); }
+/* 触屏没有 hover：操作按钮必须常驻，否则预览/加号/删除永远点不到 */
+@media (hover: none) {
+  .file-actions { opacity: 1; }
+}
 
 .file-checkbox {
   width: 16px;

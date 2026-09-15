@@ -1,12 +1,14 @@
 <script setup>
 import { computed, ref, watch, onUnmounted } from 'vue'
 import { marked } from 'marked'
-import { API_BASE, authHeaders, getToken } from '../api'
 import { isImage, isVideo, sanitizeHtml, fileKind } from '../utils'
+import { useFileUrl, downloadFile } from '../composables/useFileUrl'
 
 const props = defineProps({
   msg: { type: Object, required: true },
 })
+// 预览弹窗是 App 级的单例，消息里只负责"请求预览"
+const emit = defineEmits(['preview'])
 
 // computed 缓存 markdown 渲染结果：流式期间只有当前消息的 MessageItem 会重渲染，
 // 且同一文本不会重复解析
@@ -26,49 +28,30 @@ const stagePercent = computed(() => {
 })
 
 // ── 输出文件预览 ──
-// 服务端配置 AUTH_TOKEN 时，<img>/<video>/<a download> 这类标签请求不会带自定义头，
-// 预览和下载都会 401。所以启用鉴权时先用 fetch 取成 blob 再交给标签；未启用鉴权时
-// 保持直链，视频才能走 range 流式播放（不必先整包下载）。
-const previewSrc = ref('')
-const previewFailed = ref(false)
-let objectUrl = ''
+// 鉴权/直链的取舍集中在 useFileUrl 里（开了 AUTH_TOKEN 就得走 fetch+blob，
+// 因为 <img>/<video>/<a download> 带不了自定义请求头）。
 const canPreview = computed(() => isImage(props.msg.outputFile) || isVideo(props.msg.outputFile))
-const outputUrl = computed(() => `${API_BASE}/output/${encodeURIComponent(props.msg.outputFile || '')}`)
-const downloadHref = computed(() => previewSrc.value || outputUrl.value)
+const target = computed(() =>
+  canPreview.value ? { name: props.msg.outputFile || '', src: 'output' } : { name: '', src: 'output' }
+)
+const { url: previewSrc, error: previewError, oversized: previewOversized } = useFileUrl(target)
+// 未启用鉴权时 url 是直链、不经过 fetch，所以"文件已被删除"只能靠标签的 error 事件发现
+const imgFailed = ref(false)
+const previewFailed = computed(() => imgFailed.value || !!previewError.value || previewOversized.value > 0)
+watch(() => props.msg.outputFile, () => { imgFailed.value = false })
+function onPreviewError() { imgFailed.value = true }
 
-function releaseObjectUrl() {
-  if (objectUrl) {
-    URL.revokeObjectURL(objectUrl)
-    objectUrl = ''
-  }
+function requestPreview() {
+  if (!props.msg.outputFile) return
+  emit('preview', { name: props.msg.outputFile, src: 'output' })
 }
 
-async function loadPreview() {
-  const file = props.msg.outputFile
-  releaseObjectUrl()
-  previewFailed.value = false
-  previewSrc.value = ''
-  if (!file) return
-  if (!getToken() || !canPreview.value) {
-    previewSrc.value = `${API_BASE}/output/${encodeURIComponent(file)}`
-    return
-  }
-  try {
-    const res = await fetch(`${API_BASE}/output/${encodeURIComponent(file)}`, { headers: authHeaders() })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const blob = await res.blob()
-    if (props.msg.outputFile !== file) return // 期间已切换到别的文件，丢弃这次结果
-    objectUrl = URL.createObjectURL(blob)
-    previewSrc.value = objectUrl
-  } catch {
-    if (props.msg.outputFile === file) previewFailed.value = true
-  }
+function requestChipPreview(f) {
+  emit('preview', { name: f.name, src: f.src === 'output' ? 'output' : 'upload' })
 }
 
-watch(() => props.msg.outputFile, loadPreview, { immediate: true })
-
-function onPreviewError() {
-  previewFailed.value = true
+function downloadOutput() {
+  downloadFile(props.msg.outputFile, 'output', previewSrc.value).catch(() => {})
 }
 
 // v-html 内容里的代码块复制按钮，通过事件委托绑定
@@ -108,7 +91,6 @@ function copyAnswer() {
 
 onUnmounted(() => {
   clearTimeout(copiedTimer)
-  releaseObjectUrl()
 })
 </script>
 
@@ -117,11 +99,18 @@ onUnmounted(() => {
     <div class="avatar" aria-hidden="true">{{ msg.role === 'user' ? '👤' : msg.role === 'ai' ? '🤖' : '⚙️' }}</div>
     <div class="bubble">
       <div v-if="msg.files?.length" class="msg-files">
-        <span v-for="f in msg.files" :key="`${f.src}-${f.name}`" class="msg-file-chip">
+        <button
+          v-for="f in msg.files"
+          :key="`${f.src}-${f.name}`"
+          type="button"
+          class="msg-file-chip"
+          title="点击预览"
+          @click="requestChipPreview(f)"
+        >
           <span class="msg-file-icon">{{ f.src === 'output' ? '🎯' : fileKind(f.name).icon }}</span>
           <span class="msg-file-name">{{ f.name }}</span>
           <span v-if="f.src === 'output'" class="msg-file-tag">输出</span>
-        </span>
+        </button>
       </div>
 
       <!-- 等待首个事件（图谱还在跑、尚未推送 status）：三点动画 -->
@@ -152,26 +141,22 @@ onUnmounted(() => {
       <div v-if="msg.outputFile" class="output-area">
         <div class="output-head">
           <span class="output-tag">输出</span>
-          <span class="output-name" :title="msg.outputFile">{{ msg.outputFile }}</span>
-          <a class="output-dl" :href="downloadHref" download>⬇ 下载</a>
+          <button class="output-name" type="button" :title="`点击预览 ${msg.outputFile}`" @click="requestPreview">
+            {{ msg.outputFile }}
+          </button>
+          <button class="output-dl" type="button" @click="downloadOutput">⬇ 下载</button>
         </div>
-        <a
+        <!-- 图片点击进弹窗预览（比新开标签页更克制，且能左右切换同一批输出） -->
+        <button
           v-if="isImage(msg.outputFile) && previewSrc && !previewFailed"
           class="preview-link"
-          :href="previewSrc"
-          target="_blank"
-          rel="noreferrer"
-          title="在新标签页打开原图"
+          type="button"
+          title="点击放大预览"
+          @click="requestPreview"
         >
-          <img
-            :src="previewSrc"
-            class="preview-img"
-            loading="lazy"
-            alt="输出预览"
-            @error="onPreviewError"
-          />
-        </a>
-        <!-- 视频不要套在 <a> 里：点击播放/进度条会被链接拦截 -->
+          <img :src="previewSrc" class="preview-img" loading="lazy" alt="输出预览" @error="onPreviewError" />
+        </button>
+        <!-- 视频自带控件，不要再包一层按钮：点击播放/进度条会被拦截 -->
         <video
           v-else-if="isVideo(msg.outputFile) && previewSrc && !previewFailed"
           :src="previewSrc"
@@ -179,7 +164,9 @@ onUnmounted(() => {
           controls
           @error="onPreviewError"
         />
-        <span v-if="previewFailed" class="preview-missing">预览不可用（文件可能已被删除）</span>
+        <span v-if="previewFailed" class="preview-missing">
+          {{ previewOversized ? '文件较大，点击上方文件名预览或下载' : '预览不可用（文件可能已被删除）' }}
+        </span>
       </div>
 
       <div v-if="canCopyAnswer" class="msg-actions">
@@ -417,6 +404,7 @@ onUnmounted(() => {
   gap: 6px;
   margin-bottom: 8px;
 }
+/* 文件标签可点击预览：改成 button 后要清掉浏览器默认样式 */
 .msg-file-chip {
   display: flex;
   align-items: center;
@@ -426,14 +414,19 @@ onUnmounted(() => {
   border-radius: var(--dsh-r-pill);
   padding: 2px 8px;
   font-size: var(--dsh-fs-sm);
+  font-family: inherit;
   color: var(--dsh-text-2);
   max-width: 100%;
+  cursor: pointer;
+  transition: background var(--dsh-dur) var(--dsh-ease), border-color var(--dsh-dur) var(--dsh-ease);
 }
+.msg-file-chip:hover { border-color: var(--dsh-brand-line); background: var(--dsh-brand-soft); color: var(--dsh-brand); }
 .user .msg-file-chip {
   background: var(--dsh-on-brand-veil);
   border-color: var(--dsh-on-brand-line);
   color: var(--dsh-text-invert);
 }
+.user .msg-file-chip:hover { background: var(--dsh-on-brand-veil-strong); }
 .msg-file-icon { font-size: 12px; flex-shrink: 0; }
 .msg-file-name {
   overflow: hidden;
@@ -480,10 +473,21 @@ onUnmounted(() => {
   color: var(--dsh-text-2);
   font-family: Consolas, 'Courier New', monospace;
   font-size: var(--dsh-fs-sm);
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--dsh-dur) var(--dsh-ease);
 }
+.output-name:hover { color: var(--dsh-brand); text-decoration: underline; text-underline-offset: 2px; }
 .output-dl {
   flex-shrink: 0;
   margin-left: auto;
+  font-family: inherit;
+  font-size: var(--dsh-fs-base);
+  color: var(--dsh-brand);
+  cursor: pointer;
   font-weight: 500;
   padding: 2px 10px;
   border: 1px solid var(--dsh-brand-line);
@@ -491,8 +495,18 @@ onUnmounted(() => {
   background: var(--dsh-brand-soft);
   transition: background var(--dsh-dur) var(--dsh-ease), border-color var(--dsh-dur) var(--dsh-ease);
 }
-.output-dl:hover { background: var(--dsh-surface); border-color: var(--dsh-brand); text-decoration: none; }
-.preview-link { display: block; line-height: 0; }
+.output-dl:hover { background: var(--dsh-surface); border-color: var(--dsh-brand); }
+/* 图片预览按钮：清掉默认按钮样式，点击进弹窗 */
+.preview-link {
+  display: block;
+  line-height: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: zoom-in;
+  align-self: flex-start;
+  max-width: 100%;
+}
 .preview-img {
   max-width: 100%;
   max-height: 360px;
