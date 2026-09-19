@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from 'vue'
+import ModelPicker from './ModelPicker.vue'
 
 const show = defineModel('show', { type: Boolean, default: false })
 const props = defineProps({
@@ -7,6 +8,8 @@ const props = defineProps({
   settings: { type: Object, required: true },
   scope: { type: String, default: 'global' },
   role: { type: String, default: 'text' },
+  // 视觉角色的接口地址可以留空（沿用主模型），此时拉列表要用主模型的地址
+  fallbackBaseUrl: { type: String, default: '' },
   // 是否单独配置视觉模型（仅 vision 角色有意义）
   visionEnabled: { type: Boolean, default: false },
   // 没有打开任何对话时不能选"仅本对话"
@@ -108,7 +111,13 @@ const visionOverriddenText = computed(() =>
 
           <label class="settings-field">
             <span>模型名称</span>
-            <input v-model="settings.model" placeholder="如 gpt-4o-mini / deepseek-chat" />
+            <ModelPicker
+              v-model="settings.model"
+              :base-url="settings.base_url"
+              :api-key="settings.api_key"
+              role="text"
+              placeholder="如 gpt-4o-mini / deepseek-chat"
+            />
           </label>
           <label class="settings-field">
             <span>接口地址 <span class="field-hint">OpenAI 兼容的 BASE_URL</span></span>
@@ -153,8 +162,14 @@ const visionOverriddenText = computed(() =>
 
           <template v-if="visionEnabled">
             <label class="settings-field">
-              <span>视觉模型名称</span>
-              <input v-model="settings.model" placeholder="如 gpt-4o / qwen-vl-max" />
+              <span>视觉模型名称 <span class="field-hint">列表里带「可用视觉」的更适合</span></span>
+              <ModelPicker
+                v-model="settings.model"
+                :base-url="settings.base_url || fallbackBaseUrl"
+                :api-key="settings.api_key"
+                role="vision"
+                placeholder="如 gpt-4o / qwen-vl-max"
+              />
             </label>
             <label class="settings-field">
               <span>接口地址 <span class="field-hint">留空表示与主模型相同</span></span>

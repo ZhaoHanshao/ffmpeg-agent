@@ -387,6 +387,7 @@ onUnmounted(() => {
       :role="role"
       :vision-enabled="visionToggle"
       :can-use-conversation-scope="!!currentId"
+      :fallback-base-url="isConversation ? convSettings.base_url : settings.base_url"
       :override-fields="settingsOverrideFields"
       :vision-override-fields="visionOverrideFields"
       :vision-summary="visionSummary"

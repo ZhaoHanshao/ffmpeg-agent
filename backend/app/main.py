@@ -779,7 +779,10 @@ from fastapi.staticfiles import StaticFiles
 from app.model import (
     get_model_config, update_model_config, merged_config, mask_config,
     is_config_configured, build_model_for, get_vision_config, merged_vision_config,
+    is_masked_key, stored_key_for,
 )
+# 从 OpenAI 兼容提供商拉取可用模型列表（设置弹窗的下拉列表）
+from app.providers import fetch_models, friendly_error as models_error
 # 用户显式写出的 ffmpeg 参数（如 -crf 18）需要原样保留，不被模型改写
 from app.media import extract_explicit_params
 # 多对话：会话记录持久化 + 对话级模型覆盖
@@ -941,6 +944,34 @@ async def delete_conversation_route(cid: str):
     if not delete_conversation(cid):
         raise HTTPException(status_code=404, detail='对话不存在')
     return {"deleted": cid}
+
+
+@app.post("/api/settings/llm/models")
+async def list_llm_models(body: dict = None):
+    """按给定的 base_url 拉取可用模型列表，供设置弹窗做下拉选择。
+
+    body = {"base_url": "...", "api_key": "...", "role": "text"|"vision"}
+    api_key 留空或传脱敏回显值时，用服务端已存的 key —— 但**仅当 base_url 与
+    已存的一致**，否则等于把密钥发给别的地址（stored_key_for 里做了这个校验）。
+    """
+    body = body or {}
+    base_url = (body.get('base_url') or '').strip()
+    if not base_url:
+        raise HTTPException(status_code=400, detail='请先填写接口地址（BASE_URL）')
+    role = 'vision' if body.get('role') == 'vision' else 'text'
+    api_key = (body.get('api_key') or '').strip()
+    if not api_key or is_masked_key(api_key):
+        api_key = stored_key_for(role, base_url)
+
+    try:
+        models = await asyncio.to_thread(fetch_models, base_url, api_key)
+    except Exception as e:  # noqa: BLE001 - 转成能照着做的提示
+        logger.warning(f'获取模型列表失败（{base_url}）：{e}')
+        raise HTTPException(status_code=400, detail=models_error(e, base_url))
+
+    if not models:
+        raise HTTPException(status_code=400, detail='该地址没有返回任何模型')
+    return {'models': models, 'count': len(models)}
 
 
 async def _check_llm_connection(cfg: dict = None) -> dict:

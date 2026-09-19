@@ -84,6 +84,14 @@ export const api = {
   health() {
     return request('/health').then((r) => r.json())
   },
+  /** 让服务端去提供商拉可用模型列表（浏览器直连常被 CORS 挡）。 */
+  listModels(body) {
+    return request('/settings/llm/models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => r.json())
+  },
 
   // ── 多对话 ──
   listConversations(mode = '') {

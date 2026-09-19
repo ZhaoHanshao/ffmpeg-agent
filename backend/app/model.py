@@ -130,6 +130,37 @@ def mask_key(key: str) -> str:
     return f'{key[:3]}****{key[-4:]}'
 
 
+def is_masked_key(value: str) -> bool:
+    """判断一个值是不是脱敏回显（`sk-****abcd`）——这种值不能当成真实 key 使用。"""
+    return '****' in str(value or '')
+
+
+def _same_base_url(a: str, b: str) -> bool:
+    """比较两个 base_url 是否指向同一个地方（忽略末尾斜杠与大小写）。"""
+    return (a or '').strip().rstrip('/').lower() == (b or '').strip().rstrip('/').lower()
+
+
+def stored_key_for(role: str, base_url: str) -> str:
+    """取服务端已存的、**与该 base_url 匹配的**真实 key；不匹配则返回空串。
+
+    这个匹配校验是必要的：拉模型列表时若把已存的 key 发到用户随手填的另一个地址上，
+    就等于把密钥泄露给了第三方。
+    """
+    with _config_lock:
+        text = copy.deepcopy(_model_config)
+        vision_layer = copy.deepcopy(_vision_config)
+    if role == VISION_ROLE and vision_layer:
+        try:
+            cfg = _apply_override(text, vision_layer)
+        except ValueError:
+            cfg = text
+    else:
+        cfg = text
+    if not _same_base_url(cfg.get('base_url'), base_url):
+        return ''
+    return cfg.get('api_key') or ''
+
+
 def is_configured():
     with _config_lock:
         return bool(_model_config.get('model') and _model_config.get('base_url') and _model_config.get('api_key'))
