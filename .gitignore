@@ -21,3 +21,6 @@ ffmpeg2pass-*.log*
 /release/dist/
 /release/tools/
 /release/*.zip
+# Electron 打包产物（安装包/免安装版/冒烟截图）
+/release/electron/
+/release/electron-smoke/

@@ -1,0 +1,71 @@
+{
+  "name": "ffmpeg-agent",
+  "productName": "FFmpeg Agent",
+  "version": "0.2.0",
+  "description": "用自然语言生成并执行 ffmpeg / ffprobe 命令",
+  "main": "src/main.js",
+  "author": "ZhaoHanshao",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "smoke": "electron scripts/smoke.js",
+    "pack": "electron-builder --win --dir",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "44.5.1",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.zhaohanshao.ffmpeg-agent",
+    "productName": "FFmpeg Agent",
+    "directories": {
+      "output": "../release/electron",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../release/dist/ffmpeg-agent",
+        "to": "backend"
+      },
+      {
+        "from": "../frontend/dist",
+        "to": "frontend/dist"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "FFmpeg Agent",
+      "artifactName": "FFmpeg-Agent-${version}-win-x64-Setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "FFmpeg-Agent-${version}-win-x64-Portable.${ext}"
+    }
+  }
+}
