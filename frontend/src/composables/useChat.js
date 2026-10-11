@@ -11,6 +11,9 @@ export function useChat(mode) {
   const autoScroll = ref(true)
   let controller = null
   let rafId = 0
+  // 当前流式任务的 job_id：必须声明在 composable 作用域，
+  // stopChat() 才能读到它（之前误声明在 sendMessage 内，导致停止按钮抛 ReferenceError）
+  let jobId = ''
 
   const canSend = computed(() => !sending.value && question.value.trim() !== '')
 
@@ -44,13 +47,24 @@ export function useChat(mode) {
     autoScroll.value = true
   }
 
-  async function sendMessage(files = []) {
+  /** 载入某个对话的历史消息（切换对话时由 App.vue 调用）。 */
+  function setMessages(list) {
+    messages.value = list || []
+    autoScroll.value = true
+    nextTick(() => scrollToBottom('auto'))
+  }
+
+  async function sendMessage(files = [], conversationId = '') {
     const text = question.value.trim()
     if (!text || sending.value) return ''
 
     messages.value.push({ role: 'user', text, files })
     question.value = ''
-    const reply = reactive({ role: 'ai', text: '', outputFile: '' })
+    // error 独立于 text：错误块要单独排版，不能混进 markdown 正文里
+    const reply = reactive({
+      role: 'ai', text: '', outputFile: '', stage: '', error: '',
+      pending: true, streaming: true,
+    })
     messages.value.push(reply)
     sending.value = true
     autoScroll.value = true
@@ -58,13 +72,14 @@ export function useChat(mode) {
 
     const ac = new AbortController()
     controller = ac
-    let jobId = ''
-    let lastStatus = ''
+    jobId = ''
     const endpoint = mode.value === 'ffprobe' ? '/probe/chat' : '/chat'
 
     try {
       const form = new FormData()
       form.append('question', text)
+      // 对话 id：后端据此把本轮问答写进该对话的记录，并按该对话的模型覆盖调用 LLM
+      if (conversationId) form.append('conversation_id', conversationId)
       for (const f of files) form.append('files', `${f.src === 'output' ? 'download' : 'upload'}:${f.name}`)
       // 多轮记忆：把最近 6 条历史(不含当前提问与占位回复)随请求发给后端
       const roleName = { user: '用户', ai: '助手', system: '系统' }
@@ -106,18 +121,22 @@ export function useChat(mode) {
               continue
             }
             if (data.event === 'status') {
-              lastStatus = data.text
-              reply.text = `⏳ ${data.text}`
+              // 阶段提示单独放 stage：它可能包含"正在理解素材画面…"这类
+              // 多模态分析进展，不该覆盖正在流式输出的回答正文。
+              reply.stage = data.text
+              reply.pending = false
             } else if (data.event === 'token') {
-              if (lastStatus) {
-                reply.text = `${lastStatus}\n\n`
-                lastStatus = ''
-              }
+              if (reply.stage) reply.stage = ''
+              reply.pending = false
               reply.text += data.text
             } else if (data.event === 'meta' && data.output_file) {
               reply.outputFile = data.output_file
+              reply.pending = false
             } else if (data.event === 'error') {
-              reply.text += `\n[错误] ${data.text}`
+              if (reply.stage) reply.stage = ''
+              reply.error = data.text
+              reply.pending = false
+              reply.streaming = false
             }
           } catch {
             // 不完整的 JSON，等待下一个数据块补全
@@ -126,14 +145,19 @@ export function useChat(mode) {
         scheduleScroll()
       }
     } catch (e) {
-      if (e.name !== 'AbortError') reply.text = `请求失败: ${e.message}`
+      if (e.name !== 'AbortError') reply.error = `请求失败：${e.message}`
     } finally {
       if (ac.signal.aborted && reply.text) reply.text += '\n\n⏹ 已停止'
+      reply.stage = ''
+      reply.pending = false
+      reply.streaming = false
       sending.value = false
       controller = null
+      jobId = ''
       cancelAnimationFrame(rafId)
       rafId = 0
-      scrollToBottom('smooth')
+      // 用户已经往上翻看历史时不要把他拽回底部（页面上有"回到最新"按钮可用）
+      if (autoScroll.value) scrollToBottom('smooth')
     }
 
     return reply.outputFile
@@ -141,11 +165,13 @@ export function useChat(mode) {
 
   function stopChat() {
     // 通知后端真实终止任务(杀掉 ffmpeg/ffprobe 进程、停止 graph),再断开流
-    if (jobId) {
+    const id = jobId
+    jobId = ''
+    if (id) {
       fetch(`${API_BASE}/chat/stop`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ job_id: jobId }),
+        body: JSON.stringify({ job_id: id }),
       }).catch(() => {})
     }
     controller?.abort()
@@ -157,9 +183,12 @@ export function useChat(mode) {
     sending,
     canSend,
     chatContainer,
+    autoScroll,
+    scrollToBottom,
     sendMessage,
     stopChat,
     clearMessages,
+    setMessages,
     onChatScroll,
   }
 }

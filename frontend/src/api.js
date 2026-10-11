@@ -21,7 +21,21 @@ async function request(path, options = {}) {
     ...options,
     headers: { ...authHeaders(), ...(options.headers || {}) },
   })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) {
+    // 把服务端的 detail 带出来：否则调用方只能看到 "HTTP 400"，
+    // 丢掉 "API Key 无效" 这类真正有用的信息。
+    let detail = ''
+    try {
+      const body = await res.json()
+      detail = body?.detail || body?.message || ''
+    } catch {
+      // 响应不是 JSON（例如 HTML 错误页），忽略
+    }
+    const err = new Error(detail || `HTTP ${res.status}`)
+    err.status = res.status
+    err.detail = detail
+    throw err
+  }
   return res
 }
 
@@ -69,6 +83,40 @@ export const api = {
   },
   health() {
     return request('/health').then((r) => r.json())
+  },
+  /** 让服务端去提供商拉可用模型列表（浏览器直连常被 CORS 挡）。 */
+  listModels(body) {
+    return request('/settings/llm/models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => r.json())
+  },
+
+  // ── 多对话 ──
+  listConversations(mode = '') {
+    const qs = mode ? `?mode=${encodeURIComponent(mode)}` : ''
+    return request(`/conversations${qs}`).then((r) => r.json())
+  },
+  createConversation(mode) {
+    return request('/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    }).then((r) => r.json())
+  },
+  getConversation(id) {
+    return request(`/conversations/${encodeURIComponent(id)}`).then((r) => r.json())
+  },
+  updateConversation(id, body) {
+    return request(`/conversations/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => r.json())
+  },
+  deleteConversation(id) {
+    return request(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }).then((r) => r.json())
   },
 }
 

@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;" />
+<title>FFmpeg Agent</title>
+<style>
+  /* 颜色值刻意与 frontend/src/styles/tokens.css 保持一致（这张图加载在主应用之前，
+     引不到那份样式表，所以只能在这里复制一份；改配色时两处一起改）。 */
+  :root {
+    --brand: #4f6ef7;
+    --brand-strong: #3b5de7;
+    --brand-soft: #eef1ff;
+    --text: #1a1a2e;
+    --text-3: #6b7280;
+    --text-4: #9ca3af;
+    --surface: #ffffff;
+    --border: #e5e7eb;
+    --surface-3: #f1f2f6;
+    --danger: #ef4444;
+    --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: transparent;
+    font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, -apple-system, sans-serif;
+    color: var(--text);
+    -webkit-user-select: none;
+    user-select: none;
+    overflow: hidden;
+  }
+
+  .card {
+    position: relative;
+    height: 100%;
+    margin: 10px;
+    padding: 26px 28px 22px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 0 12px 32px rgba(16, 24, 40, 0.18), 0 2px 8px rgba(16, 24, 40, 0.08);
+    display: flex;
+    flex-direction: column;
+    /* 无边框窗口靠这条把整张卡片变成可拖动区域 */
+    -webkit-app-region: drag;
+  }
+
+  .head { display: flex; align-items: center; gap: 13px; }
+
+  .logo {
+    width: 44px; height: 44px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, var(--brand) 0%, var(--brand-strong) 100%);
+    box-shadow: 0 2px 8px rgba(79, 110, 247, 0.28);
+    display: grid; place-items: center;
+    flex: none;
+  }
+
+  .logo svg { width: 24px; height: 24px; display: block; }
+
+  .titles { min-width: 0; }
+
+  h1 {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+  }
+
+  .ver { font-size: 11px; color: var(--text-4); margin-top: 2px; }
+
+  .body { margin-top: 22px; flex: 1; display: flex; flex-direction: column; }
+
+  .step {
+    font-size: 13px;
+    color: var(--text-3);
+    line-height: 1.5;
+    min-height: 40px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .step.error { color: var(--danger); }
+
+  .bar {
+    margin-top: 12px;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    overflow: hidden;
+  }
+
+  .bar > i {
+    display: block;
+    height: 100%;
+    width: 0%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--brand) 0%, var(--brand-strong) 100%);
+    transition: width 0.3s var(--ease);
+  }
+
+  /* 进度未知时用一条来回扫的条，避免"卡在 0%"的错觉 */
+  .bar.indeterminate > i {
+    width: 35% !important;
+    animation: sweep 1.3s var(--ease) infinite;
+  }
+
+  @keyframes sweep {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(340%); }
+  }
+
+  .foot {
+    margin-top: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-4);
+  }
+
+  .pct { font-variant-numeric: tabular-nums; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bar.indeterminate > i { animation: none; width: 100% !important; }
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="head">
+      <div class="logo">
+        <!-- 胶片 + 播放三角：不引外部资源，直接内联 -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2.5" y="4.5" width="19" height="15" rx="2.5"></rect>
+          <path d="M2.5 9.2h19M2.5 14.8h19M7 4.5v15M17 4.5v15"></path>
+          <path d="M10.6 11.2l3.6 2.1-3.6 2.1z" fill="#fff" stroke="none"></path>
+        </svg>
+      </div>
+      <div class="titles">
+        <h1>FFmpeg Agent</h1>
+        <div class="ver" id="ver">正在启动…</div>
+      </div>
+    </div>
+
+    <div class="body">
+      <div class="step" id="step">正在启动后端服务…</div>
+      <div class="bar indeterminate" id="bar"><i id="fill"></i></div>
+    </div>
+
+    <div class="foot">
+      <span id="hint">首次启动需准备知识库，可能需要几分钟</span>
+      <span class="pct" id="pct"></span>
+    </div>
+  </div>
+
+<script>
+  const stepEl = document.getElementById('step')
+  const barEl = document.getElementById('bar')
+  const fillEl = document.getElementById('fill')
+  const pctEl = document.getElementById('pct')
+  const verEl = document.getElementById('ver')
+
+  const HINTS = [
+    '首次启动需准备知识库，可能需要几分钟',
+    '首次运行会自动下载 ffmpeg（约 100MB）',
+    '模型配置在页面右上角 ⚙️ 里填写'
+  ]
+  let hintIndex = 0
+  setInterval(() => {
+    hintIndex = (hintIndex + 1) % HINTS.length
+    document.getElementById('hint').textContent = HINTS[hintIndex]
+  }, 6000)
+
+  function render (s) {
+    if (!s) return
+    const step = s.step || '正在启动后端服务…'
+    stepEl.textContent = step
+    stepEl.classList.toggle('error', s.status === 'error')
+
+    const pct = Number(s.progress) || 0
+    // 有明确百分比就显示确定进度，否则用扫描条
+    const known = pct > 0 && pct < 100
+    barEl.classList.toggle('indeterminate', !known)
+    if (known) fillEl.style.width = pct + '%'
+    pctEl.textContent = known ? pct + '%' : ''
+  }
+
+  if (window.agentHost) {
+    window.agentHost.onBackendStatus(render)
+    window.agentHost.info().then((i) => {
+      if (i && i.version) verEl.textContent = 'v' + i.version + (i.packaged ? '' : ' · 开发模式')
+    }).catch(() => {})
+  } else {
+    verEl.textContent = ''
+  }
+</script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     一键生成 ffmpeg-agent 的 GitHub Release：本地构建前端、打包 zip、打 tag、gh 创建 Release，并按需构建 Windows exe 包、推送 Docker 镜像到 GHCR。
 
@@ -19,6 +19,10 @@
 .PARAMETER Exe
     同时构建 Windows 便携版 exe 包（调 build_exe.ps1，耗时 15~30 分钟）并上传到 Release。
 
+.PARAMETER Electron
+    同时构建 Windows 桌面版（Electron 安装包 + 免安装版，调 build_electron.ps1，
+    耗时 20~40 分钟）并上传到 Release。
+
 .PARAMETER SkipDocker
     跳过 Docker 镜像构建与推送。
 
@@ -30,12 +34,14 @@
     .\release.ps1 -Version 0.2.0      # 指定版本
     .\release.ps1 -SkipDocker         # 只出 zip + Release，不推镜像
     .\release.ps1 -Exe -SkipDocker    # 源码 zip + Windows exe 包，不推镜像
+    .\release.ps1 -Electron -SkipDocker   # 源码 zip + Windows 桌面版
 #>
 
 [CmdletBinding()]
 param(
     [string]$Version,
     [switch]$Exe,
+    [switch]$Electron,
     [switch]$SkipDocker,
     [switch]$Yes
 )
@@ -174,6 +180,24 @@ if ($Exe) {
     gh release upload $Tag $exeZip --clobber
     Assert-ExitOk $LASTEXITCODE "上传 exe 包失败"
     Write-Host "  已上传: $exeZip" -ForegroundColor Green
+}
+
+# ── 可选：Windows 桌面版（Electron）──
+if ($Electron) {
+    Write-Step 'Step 7/9 构建 Windows 桌面版（Electron，约 20~40 分钟）'
+    & (Join-Path $Root 'build_electron.ps1') -Version $Version -SkipFrontend
+    Assert-ExitOk $LASTEXITCODE 'build_electron.ps1 失败（构建桌面版失败）'
+    $electronDir = Join-Path $Root 'release\electron'
+    $apps = @(
+        (Join-Path $electronDir "FFmpeg-Agent-$Version-win-x64-Setup.exe"),
+        (Join-Path $electronDir "FFmpeg-Agent-$Version-win-x64-Portable.exe")
+    )
+    foreach ($a in $apps) {
+        if (-not (Test-Path $a)) { throw "未找到桌面版产物: $a" }
+        gh release upload $Tag $a --clobber
+        Assert-ExitOk $LASTEXITCODE "上传 $([System.IO.Path]::GetFileName($a)) 失败"
+        Write-Host "  已上传: $a" -ForegroundColor Green
+    }
 }
 
 # ── Docker（可选）──
