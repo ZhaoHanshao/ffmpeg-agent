@@ -22,7 +22,7 @@ import os
 import subprocess
 import tempfile
 
-from app.tools import ffmpeg_bin, VIRTUAL_SOURCES
+from app.tools import ffmpeg_bin, VIRTUAL_SOURCES, silent_spawn_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ def _probe_json(path: str) -> dict:
         proc = subprocess.run(
             [ffmpeg_bin('ffprobe'), '-v', 'error', '-print_format', 'json',
              '-show_format', '-show_streams', path],
-            capture_output=True, timeout=30,
+            capture_output=True, timeout=30, **silent_spawn_kwargs(),
         )
         import json
         return json.loads(proc.stdout.decode(errors='replace') or '{}')
@@ -103,20 +103,26 @@ def _summarize_probe(info: dict) -> str:
     return '；'.join(parts)
 
 
+def _run_ffmpeg(ff: str, args: list, dest: str) -> bool:
+    """跑一次 ffmpeg 生成 dest；成功（文件非空）返回 True。
+
+    提到模块级（原先是 _extract_images 里的闭包）是为了能单独测到"不弹控制台窗口"
+    这个参数——抽帧/画波形都会走这里，漏一处就又会有黑框闪出来。
+    """
+    try:
+        subprocess.run([ff, '-v', 'error', '-y', *args, dest],
+                       capture_output=True, timeout=60, **silent_spawn_kwargs())
+        return os.path.isfile(dest) and os.path.getsize(dest) > 0
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f'抽取图像失败：{e}')
+        return False
+
+
 def _extract_images(path: str, ext: str, tmpdir: str) -> list[str]:
     """按类型抽取图像：视频抽帧、音频画波形、图片直接用。返回文件路径列表。"""
     ff = ffmpeg_bin('ffmpeg')
     scale = f'scale={MAX_IMAGE_WIDTH}:-2'
     out = []
-
-    def _run(args, dest):
-        try:
-            subprocess.run([ff, '-v', 'error', '-y', *args, dest],
-                           capture_output=True, timeout=60)
-            return os.path.isfile(dest) and os.path.getsize(dest) > 0
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f'抽取图像失败：{e}')
-            return False
 
     if ext in ('.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.wmv', '.m4v', '.ts'):
         info = _probe_json(path)
@@ -128,18 +134,19 @@ def _extract_images(path: str, ext: str, tmpdir: str) -> list[str]:
         stamps = [dur * r for r in (0.1, 0.5, 0.9)] if dur > 0 else [0, 1, 2]
         for i, t in enumerate(stamps[:MAX_VIDEO_FRAMES]):
             dest = os.path.join(tmpdir, f'frame{i}.jpg')
-            if _run(['-ss', f'{max(0.0, t):.2f}', '-i', path, '-frames:v', '1',
-                     '-vf', scale, '-q:v', str(JPEG_QUALITY)], dest):
+            if _run_ffmpeg(ff, ['-ss', f'{max(0.0, t):.2f}', '-i', path, '-frames:v', '1',
+                                '-vf', scale, '-q:v', str(JPEG_QUALITY)], dest):
                 out.append(dest)
     elif ext in ('.mp3', '.wav', '.flac', '.aac', '.m4a', '.ogg', '.opus', '.wma'):
         # 波形图能让视觉模型看出静音段/削波/音量过低
         dest = os.path.join(tmpdir, 'wave.png')
-        if _run(['-i', path, '-filter_complex',
-                 'showwavespic=s=768x200:colors=#4f6ef7', '-frames:v', '1'], dest):
+        if _run_ffmpeg(ff, ['-i', path, '-filter_complex',
+                            'showwavespic=s=768x200:colors=#4f6ef7', '-frames:v', '1'], dest):
             out.append(dest)
     elif ext in ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'):
         dest = os.path.join(tmpdir, 'image.jpg')
-        if _run(['-i', path, '-frames:v', '1', '-vf', scale, '-q:v', str(JPEG_QUALITY)], dest):
+        if _run_ffmpeg(ff, ['-i', path, '-frames:v', '1', '-vf', scale, '-q:v',
+                            str(JPEG_QUALITY)], dest):
             out.append(dest)
     return out
 

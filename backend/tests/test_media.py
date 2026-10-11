@@ -180,5 +180,44 @@ for p in (video, audio, image):
     if os.path.isfile(p):
         os.remove(p)
 
+
+# ── media 自己的两条 spawn 路径也要静默（不弹控制台窗口）──
+# test_probe_output 覆盖了 tools 的两个点，这里覆盖 media 的两个点：
+# 技术指标探测（_probe_json）与抽帧/画波形（_run_ffmpeg）。漏一个就又会闪黑框。
+print('\n--- media 子进程不弹控制台窗口 ---')
+_media_recorded = []
+_media_real_run = subprocess.run
+
+
+def _recording_run(*a, **kw):
+    _media_recorded.append(kw)
+    return _media_real_run(*a, **kw)
+
+
+subprocess.run = _recording_run
+media.subprocess.run = _recording_run   # media 里是 `import subprocess`，改模块属性即可
+try:
+    media._probe_json('/no/such/file.mp4')
+    media._run_ffmpeg(media.ffmpeg_bin('ffmpeg'),
+                      ['-f', 'lavfi', '-i', 'color=c=red:s=32x32:d=1'],
+                      os.path.join(os.path.dirname(os.path.abspath(__file__)), '_silent_probe.png'))
+finally:
+    subprocess.run = _media_real_run
+    media.subprocess.run = _media_real_run
+
+check('media 的两条路径都真的起了子进程', len(_media_recorded) == 2, f'{len(_media_recorded)} 次')
+if os.name == 'nt':
+    for _i, _kw in enumerate(_media_recorded):
+        _flags = _kw.get('creationflags') or 0
+        check(f'media 第 {_i + 1} 个 spawn 带 CREATE_NO_WINDOW',
+              bool(_flags & subprocess.CREATE_NO_WINDOW), f'creationflags={_flags}')
+else:
+    check('非 Windows 不传 creationflags',
+          all(not k.get('creationflags') for k in _media_recorded), '')
+
+_silent_png = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_silent_probe.png')
+if os.path.isfile(_silent_png):
+    os.remove(_silent_png)
+
 print(f'\n结果: {pass_count} 通过, {fail_count} 失败')
 sys.exit(0 if fail_count == 0 else 1)

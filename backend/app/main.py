@@ -4,23 +4,42 @@ from contextlib import asynccontextmanager
 # ── 冻结模式（PyInstaller 打包）预处理 ──
 # 必须在任何重依赖 import 之前执行：
 #   1) chdir 到 exe 所在目录，保证相对路径（backend/upload、frontend/dist 等）正确
-#   2) 无控制台窗口，把 stdout/stderr 重定向到 backend/logs/app.log
+#   2) 无控制台窗口，把 stdout/stderr 重定向到 <可写根>/backend/logs/app.log
 #   3) 提前设置数据目录环境变量（db_search/tools 在 import 时读取，需提前注入）
+# 可写根默认是 exe 同级目录；宿主可用 FFMPEG_AGENT_HOME 改到用户数据目录（见下）。
 FROZEN = bool(getattr(sys, 'frozen', False))
 if FROZEN:
     _exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    # 「可写状态」的根目录：日志 / 上传 / 产物 / 向量库 / ffmpeg 二进制都落在这里。
+    # 默认就是 exe 同级（便携版 zip 解压即用，行为与以前完全一致）；
+    # Electron 等安装型宿主会把它指到用户数据目录（%APPDATA%\...），
+    # 因为装到 Program Files 后 exe 旁的目录是只读的，首跑下载 ffmpeg、
+    # 复制向量库、写 app.log 都会失败。
+    _home = os.path.abspath(os.environ.get('FFMPEG_AGENT_HOME') or _exe_dir)
     os.chdir(_exe_dir)
-    _log_dir = os.path.join(_exe_dir, 'backend', 'logs')
+    _log_dir = os.path.join(_home, 'backend', 'logs')
     os.makedirs(_log_dir, exist_ok=True)
     _log_path = os.path.join(_log_dir, 'app.log')
     sys.stdout = open(_log_path, 'a', encoding='utf-8', buffering=1)
     sys.stderr = open(_log_path, 'a', encoding='utf-8', buffering=1)
-    os.environ.setdefault('DB_DIR', os.path.join(_exe_dir, 'backend', 'data', 'chroma_db'))
+    os.environ.setdefault('DB_DIR', os.path.join(_home, 'backend', 'data', 'chroma_db'))
     os.environ.setdefault('COLLECTION_NAME', 'ffmpeg_docs')
     os.environ.setdefault('PROBE_COLLECTION_NAME', 'ffprobe_docs')
-    os.environ.setdefault('BGE_CACHE_DIR', os.path.join(_exe_dir, 'backend', 'data', 'bge_onnx'))
-    os.environ.setdefault('UPLOAD', os.path.join(_exe_dir, 'backend', 'upload'))
-    os.environ.setdefault('DOWNLOAD', os.path.join(_exe_dir, 'backend', 'download'))
+    # 嵌入模型是只读资源，始终取包内的那份（以前默认指向 exe 旁，那儿从来没有过，
+    # 靠 onnx_embed.resolve_model_dir 兜底到 _MEIPASS，并每次多打一条告警）
+    os.environ.setdefault('BGE_CACHE_DIR', os.path.join(sys._MEIPASS, 'backend', 'data', 'bge_onnx'))
+    os.environ.setdefault('UPLOAD', os.path.join(_home, 'backend', 'upload'))
+    os.environ.setdefault('DOWNLOAD', os.path.join(_home, 'backend', 'download'))
+    os.environ.setdefault('FFMPEG_BIN_DIR', os.path.join(_home, 'backend', 'bin'))
+    # 这三个也必须跟着 _home 走。它们的默认值是**相对路径**（'backend/data/...'），
+    # 而冻结模式已经 chdir 到 exe 旁，于是会解析到安装目录里去：
+    # 用户填的模型配置和全部对话历史都写进 resources/backend/backend/data/，
+    # 重装/升级即丢失；装到 Program Files 时更是直接写不进去（保存静默失效）。
+    os.environ.setdefault('SETTINGS_FILE', os.path.join(_home, 'backend', 'data', 'llm_settings.json'))
+    os.environ.setdefault('CONVERSATIONS_DIR', os.path.join(_home, 'backend', 'data', 'conversations'))
+    # 已预构建向量库时用不到（不会再去抓 ffmpeg.org），但 DOC_REFRESH_DAYS>0 会，
+    # 那时抓下来的 HTML 缓存同样不该落进安装目录
+    os.environ.setdefault('DOC_CACHE_DIR', os.path.join(_home, 'backend', 'data'))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
@@ -79,8 +98,11 @@ except ValueError:
     MAX_UPLOAD_SIZE = 0
 UPLOAD_EXT_WHITELIST = {e.lower().lstrip('.') for e in os.getenv('UPLOAD_EXT_WHITELIST', '').split(',') if e.strip()}
 
-# 冻结模式下资源在 _MEIPASS（onedir = _internal 目录）内
-FRONTEND_DIST = os.path.join(sys._MEIPASS, 'frontend', 'dist') if FROZEN else 'frontend/dist'
+# 冻结模式下资源在 _MEIPASS（onedir = _internal 目录）内。
+# FRONTEND_DIST 可被宿主覆盖：Electron 用自己那份 frontend/dist，
+# 这样改前端只需 npm run build，不必重跑 20 分钟的 PyInstaller。
+FRONTEND_DIST = (os.getenv('FRONTEND_DIST')
+                 or (os.path.join(sys._MEIPASS, 'frontend', 'dist') if FROZEN else 'frontend/dist'))
 
 # 数据目录仅确保存在,不再启动/退出时清空:上传文件与转码成果跨重启保留
 def _ensure_dirs():
@@ -191,7 +213,8 @@ def _preload():
 
         if FROZEN:
             from app.ffmpeg_download import ensure_ffmpeg_bin
-            _bin_dir = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), 'backend', 'bin')
+            _bin_dir = os.environ.get('FFMPEG_BIN_DIR') or os.path.join(
+                os.path.dirname(os.path.abspath(sys.executable)), 'backend', 'bin')
             _progress(0, '检查 ffmpeg...')
             ensure_ffmpeg_bin(_bin_dir, on_progress=_progress)
 
@@ -776,10 +799,19 @@ from fastapi.staticfiles import StaticFiles
 
 
 # ── LLM 设置 ──
+# get_model / mask_key 曾经漏在这份导入清单里，而它们确实被用到了：
+#   get_model → _check_llm_connection() 在 cfg 为空那一支（PUT /api/settings/llm 的连通性探测
+#               是不传参调的），于是每次保存全局模型配置都报
+#               "知识库查询或命令执行失败：name 'get_model' is not defined"；
+#   mask_key  → _conversation_view() 给对话级覆盖里的 api_key 脱敏，
+#               于是"对话带自己的密钥"时打开该对话就 500。
+# 两者都只在特定分支才触发，靠跑常规用例发现不了，用
+#   uvx pyflakes backend/app/*.py
+# 可以一次把这类"引用了但没导入"的名字全查出来。
 from app.model import (
-    get_model_config, update_model_config, merged_config, mask_config,
-    is_config_configured, build_model_for, get_vision_config, merged_vision_config,
-    is_masked_key, stored_key_for,
+    get_model, get_model_config, update_model_config, merged_config, mask_config,
+    mask_key, is_config_configured, build_model_for, get_vision_config,
+    merged_vision_config, is_masked_key, stored_key_for,
 )
 # 从 OpenAI 兼容提供商拉取可用模型列表（设置弹窗的下拉列表）
 from app.providers import fetch_models, friendly_error as models_error
@@ -1007,4 +1039,10 @@ app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000)
+
+    # 宿主（Electron）会指定端口，避免固定 8000 冲突；默认值保持原样。
+    # 直接传 app 对象而不是 "app.main:app" 导入串：后者会把本模块**再导入一次**
+    # （__main__ 与 app.main 是两个模块对象），顶层重依赖与冻结预处理白跑一遍。
+    _host = os.getenv('FFMPEG_AGENT_HOST', '0.0.0.0')
+    _port = int(os.getenv('FFMPEG_AGENT_PORT', '8000') or 8000)
+    uvicorn.run(app, host=_host, port=_port)

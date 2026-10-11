@@ -136,10 +136,17 @@ def _is_frozen() -> bool:
 
 
 def ffmpeg_bin(name: str) -> str:
-    """解析 ffmpeg/ffprobe 可执行文件路径：
-    - 冻结模式：优先 exe 旁 backend/bin（首跑下载目录），否则包内 _MEIPASS/ffmpeg（旧版回退）
+    """解析 ffmpeg/ffprobe 可执行文件路径，优先级从高到低：
+    - FFMPEG_BIN_DIR 环境变量（Electron 指到用户数据目录；dev 下可指仓库内 ffmpeg/）
+    - 冻结模式：exe 旁 backend/bin（首跑下载目录），否则包内 _MEIPASS/ffmpeg（旧版回退）
     - dev 模式：返回裸命令名（依赖系统 PATH）
     """
+    env_dir = (os.getenv('FFMPEG_BIN_DIR') or '').strip()
+    if env_dir:
+        for fname in (f'{name}.exe', name):
+            cand = os.path.join(env_dir, fname)
+            if os.path.isfile(cand):
+                return cand
     if _is_frozen():
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
         cands = [
@@ -457,6 +464,29 @@ def _fmt_time(seconds: float) -> str:
     return f'{h}:{m:02d}:{sec:02d}' if h else f'{m:02d}:{sec:02d}'
 
 
+def silent_spawn_kwargs() -> dict:
+    """让 ffmpeg/ffprobe 子进程不弹控制台窗口（Windows）。
+
+    为什么必须显式处理：打包版是 **windowed（自己没有控制台）** 的 exe，而 ffmpeg/ffprobe
+    是控制台程序。父进程没有控制台时，Windows 会给子进程**新建**一个控制台窗口 ——
+    于是每执行一条命令都闪一个黑框，长转码时那个窗口会一直挂在屏幕上。
+    这正是"命令执行时弹出命令运行窗口"的来源，不是前端画的窗口。
+
+    - `CREATE_NO_WINDOW`：子进程不分配控制台。它的 stdout/stderr 依旧是我们重定向的
+      临时文件（见 _run_binary），所以进度解析与错误捕获都不受影响。
+    - `STARTUPINFO` + `SW_HIDE`：第二道保险。某些启动方式（快捷方式、被其它宿主拉起、
+      从资源管理器双击）下只有 creationflags 仍可能闪一下。
+
+    非 Windows 返回空 dict（调用处 `**silent_spawn_kwargs()` 原样可用）。
+    """
+    if os.name != 'nt':
+        return {}
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = subprocess.SW_HIDE
+    return {'creationflags': subprocess.CREATE_NO_WINDOW, 'startupinfo': si}
+
+
 def _first_input_file(run_parts: list):
     """返回第一个 -i 参数指向的本地文件路径(用于探测时长),无则 None。"""
     for i, p in enumerate(run_parts):
@@ -477,7 +507,8 @@ def _probe_duration(path: str) -> float:
         args = [probe, '-v', 'error', '-show_entries', 'format=duration',
                 '-of', 'default=noprint_wrappers=1:nokey=1', path]
         with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
-            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr)
+            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr,
+                                    **silent_spawn_kwargs())
             proc.communicate(timeout=15)
             fout.seek(0)
             text = fout.read().decode(errors='replace').strip()
@@ -491,9 +522,11 @@ def _run_binary(run_parts: list, timeout: int, label: str, stop_event=None, proc
     - stdin 指向空设备,避免 ffmpeg 的 Overwrite 等交互提示阻塞
     - 输出写入临时文件(避免管道写满死锁),轮询等待,超时/收到停止信号时强制 kill
     - progress_cb 提供时,增量读取 stdout(ffmpeg -progress pipe:1 输出)回调给上层
+    - 不弹控制台窗口:见 silent_spawn_kwargs()
     """
     with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
-        proc = subprocess.Popen(args=run_parts, stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr)
+        proc = subprocess.Popen(args=run_parts, stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr,
+                                **silent_spawn_kwargs())
         if proc_box is not None:
             proc_box[0] = proc
         try:

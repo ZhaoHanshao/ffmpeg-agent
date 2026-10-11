@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import app.main as m
+import app.model as model_mod
 
 pass_count = 0
 fail_count = 0
@@ -124,6 +125,43 @@ check('api_key 已脱敏（不含 **** 之外的原文）',
 check('调用方拿到的是新 dict（非共享缓存）',
       asyncio.run(m.get_llm_settings()) is not cfg)
 check('无 _settings_store 残留（旧实现的陈旧缓存已移除）', not hasattr(m, '_settings_store'))
+
+
+# ── 引用了但没导入的符号（NameError 回归）──
+# 这类 bug 静态看着没事、常规用例也碰不到，只在某条分支上才炸：
+#   get_model → _check_llm_connection() 的 cfg 为空那一支
+#               （PUT /api/settings/llm 的连通性探测就是不传参调的）
+#   mask_key  → _conversation_view() 给对话级覆盖里的 api_key 脱敏
+# 曾经两者都漏在 app.model 的导入清单外，用户保存全局配置时看到
+# "知识库查询或命令执行失败：name 'get_model' is not defined"。
+print('\n--- 引用了但没导入的符号 ---')
+check('main.py 导入了 get_model', hasattr(m, 'get_model'))
+check('main.py 导入了 mask_key', hasattr(m, 'mask_key'))
+
+# 行为验证：对话级覆盖带 api_key 时必须能渲染出来，且已脱敏
+_ov = m._conversation_view({
+    'id': 'a' * 32, 'title': 't', 'mode': 'ffmpeg', 'messages': [],
+    'llm': {'model': 'x', 'api_key': 'sk-realkey12345678'},
+})
+check('对话级 api_key 能渲染（不再 NameError）', _ov['llm_override'] is not None)
+check('对话级 api_key 已脱敏',
+      'sk-realkey12345678' not in str(_ov['llm_override']), str(_ov['llm_override']))
+
+_ov2 = m._conversation_view({
+    'id': 'b' * 32, 'title': 't', 'mode': 'ffmpeg', 'messages': [],
+    'llm': {'vision': {'model': 'v', 'api_key': 'sk-visionkey1234'}},
+})
+check('视觉角色覆盖的 api_key 也已脱敏',
+      'sk-visionkey1234' not in str(_ov2.get('vision_override')), str(_ov2.get('vision_override')))
+
+# 无参调用那一支：本机没配 LLM 时 get_model() 返回 None，会走到可读提示；
+# 配了就别真发请求（与项目里其他"LLM 未配置才跑"的用例保持一致）
+if not model_mod.is_configured():
+    _r = asyncio.run(m._check_llm_connection())
+    check('无参 _check_llm_connection 不再被 NameError 兜住',
+          'is not defined' not in _r.get('message', ''), _r.get('message'))
+else:
+    print('  SKIP  无参 _check_llm_connection（本机已配置 LLM，避免真发请求）')
 
 
 print(f'\n结果: {pass_count} 通过, {fail_count} 失败')

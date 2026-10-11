@@ -72,5 +72,73 @@ except InterruptedError:
 except Exception as e:  # noqa: BLE001
     check('已置位的 stop_event 立即中断', False, f'抛了 {type(e).__name__}: {e}')
 
+print('\n--- 子进程不弹控制台窗口 ---')
+# 打包版是 windowed（无控制台）的 exe，ffmpeg/ffprobe 是控制台程序：
+# 不传 CREATE_NO_WINDOW 时 Windows 会**新建**一个黑窗口，每执行一条命令闪一次。
+# 这里拦下 Popen 看真实传了什么参数（比读源码断言可靠）。
+import subprocess as _sp  # noqa: E402
+
+_recorded = []
+_real_popen = _sp.Popen
+
+
+class _RecordingPopen(_real_popen):
+    def __init__(self, *a, **kw):
+        _recorded.append(kw)
+        super().__init__(*a, **kw)
+
+
+_sp.Popen = _RecordingPopen
+try:
+    tools._run_binary([python, '-c', 'print(1)'], 30, 'silent')
+    # 时长探测是另一条独立的 spawn 路径，单独走一遍
+    tools._probe_duration(os.path.abspath(__file__))
+finally:
+    _sp.Popen = _real_popen
+
+check('_run_binary 与 _probe_duration 都真的起了子进程', len(_recorded) == 2, f'{len(_recorded)} 次')
+if os.name == 'nt':
+    for _i, _kw in enumerate(_recorded):
+        _flags = _kw.get('creationflags') or 0
+        _si = _kw.get('startupinfo')
+        check(f'第 {_i + 1} 个 spawn 带 CREATE_NO_WINDOW',
+              bool(_flags & _sp.CREATE_NO_WINDOW), f'creationflags={_flags}')
+        check(f'第 {_i + 1} 个 spawn 请求隐藏窗口（SW_HIDE）',
+              _si is not None and bool(_si.dwFlags & _sp.STARTF_USESHOWWINDOW)
+              and _si.wShowWindow == _sp.SW_HIDE,
+              f'startupinfo={_si!r}')
+else:
+    check('非 Windows 不传 creationflags',
+          all(not k.get('creationflags') for k in _recorded), '')
+
+print('\n--- 静态检查：新增的 spawn 点不能忘了静默参数 ---')
+# 上面两条只钉住了现有的两个调用点。以后谁再加一处 subprocess.Popen/run
+# 而忘了 silent_spawn_kwargs()，黑窗口就又回来了——所以扫一遍源码兜住。
+import re  # noqa: E402
+
+_app_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'app')
+_missing = []
+for _fn in sorted(os.listdir(_app_dir)):
+    if not _fn.endswith('.py'):
+        continue
+    _src = open(os.path.join(_app_dir, _fn), encoding='utf-8').read()
+    for _m in re.finditer(r'subprocess\.(?:Popen|run)\(', _src):
+        _depth = 0
+        _start = _m.end() - 1
+        _call = ''
+        for _i in range(_start, len(_src)):
+            if _src[_i] == '(':
+                _depth += 1
+            elif _src[_i] == ')':
+                _depth -= 1
+                if _depth == 0:
+                    _call = _src[_start:_i + 1]
+                    break
+        if 'silent_spawn_kwargs' not in _call:
+            _missing.append(f'{_fn}:{_src[:_m.start()].count(chr(10)) + 1}')
+
+check('backend/app 里每个 subprocess.Popen/run 都带了 silent_spawn_kwargs',
+      not _missing, '漏掉的：' + (', '.join(_missing) or '(无)'))
+
 print(f'\n结果: {pass_count} 通过, {fail_count} 失败')
 sys.exit(0 if fail_count == 0 else 1)
